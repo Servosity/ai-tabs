@@ -1,0 +1,703 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <style>
+    :root {
+      --tab-bar-bg: #0f0f1e;
+      --tab-fg: #e0e0e0;
+      --tab-inactive: #8892a8;
+      --tab-hover-bg: #16213e;
+      --tab-hover-fg: #c5a5ff;
+      --tab-active-bg: #1a1a2e;
+      --tab-accent: #9d7ee0;
+      --tab-border: #2a3a5c;
+      --tab-muted: #5c6370;
+      --tab-danger: #e05555;
+      --tab-star: #e8a838;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body {
+      height: 100%; overflow: hidden;
+      background: transparent; color: var(--tab-fg);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      user-select: none;
+    }
+
+    #tab-bar {
+      display: flex; height: 42px; align-items: stretch;
+      overflow-x: auto; overflow-y: hidden;
+      background: var(--tab-bar-bg);
+      -webkit-app-region: drag;
+      padding-right: 138px; /* Windows title bar overlay controls */
+    }
+    #tab-bar::-webkit-scrollbar { height: 0; }
+
+    .tab {
+      display: flex; align-items: center; gap: 6px;
+      padding: 0 12px; min-width: 48px;
+      background: transparent; border: none; border-bottom: 2px solid transparent;
+      border-right: 1px solid var(--tab-border);
+      color: var(--tab-inactive); font-size: 13px; cursor: grab;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      transition: background 0.15s, color 0.15s;
+      flex: 1 1 0; max-width: 240px; position: relative;
+      -webkit-app-region: no-drag;
+    }
+    /* Reserved drag handle between last tab and window controls */
+    .drag-spacer {
+      flex: 0 0 80px;
+      -webkit-app-region: drag;
+    }
+    .tab:last-child { border-right: none; }
+    .tab:hover { background: var(--tab-hover-bg); color: var(--tab-hover-fg); }
+    .tab.active {
+      background: var(--tab-active-bg); color: var(--tab-fg);
+      border-bottom-color: var(--tab-accent);
+    }
+    .tab.pinned {
+      flex: 0 0 auto; min-width: 36px; max-width: 140px; padding: 0 10px;
+    }
+    .tab.last-pinned {
+      margin-right: 7px;
+    }
+    .tab.last-pinned::after {
+      content: '';
+      position: absolute;
+      right: -5px; top: 10px; bottom: 10px;
+      width: 1px;
+      background: var(--tab-border);
+    }
+    .tab.drag-over-left { box-shadow: inset 3px 0 0 var(--tab-accent); }
+    .tab.drag-over-right { box-shadow: inset -3px 0 0 var(--tab-accent); }
+    .tab.dragging { opacity: 0.4; }
+
+    .tab-label {
+      overflow: hidden; text-overflow: ellipsis; flex: 1; text-align: left;
+      pointer-events: none;
+    }
+
+    .tab-agent-dot {
+      width: 6px; height: 6px; border-radius: 50%;
+      flex-shrink: 0; margin-right: 5px; display: inline-block;
+    }
+
+    .tab-rename {
+      flex: 1; min-width: 0;
+      background: rgba(0,0,0,0.35);
+      border: 1px solid var(--tab-accent);
+      border-radius: 3px;
+      color: var(--tab-fg);
+      font: inherit;
+      padding: 2px 4px;
+      outline: none;
+      -webkit-app-region: no-drag;
+    }
+
+    .tab-close {
+      display: flex; align-items: center; justify-content: center;
+      width: 16px; height: 16px; border-radius: 3px;
+      background: none; border: none; color: var(--tab-muted);
+      font-size: 14px; line-height: 1; cursor: pointer;
+      flex-shrink: 0;
+    }
+    .tab-close:hover { background: var(--tab-border); color: var(--tab-danger); }
+
+    /* Compressed mode: close button overlays the text end, visible on hover only */
+    .tab-bar-compressed .tab-close {
+      display: none;
+      position: absolute;
+      right: 4px; top: 50%; transform: translateY(-50%);
+      background: var(--tab-bar-bg);
+      box-shadow: -8px 0 6px -2px var(--tab-bar-bg);
+    }
+    .tab-bar-compressed .tab.active .tab-close {
+      background: var(--tab-active-bg);
+      box-shadow: -8px 0 6px -2px var(--tab-active-bg);
+    }
+    .tab-bar-compressed .tab:hover .tab-close {
+      display: flex;
+      background: var(--tab-hover-bg);
+      box-shadow: -8px 0 6px -2px var(--tab-hover-bg);
+    }
+
+    .tab.muted { opacity: 0.55; font-style: italic; }
+
+    /* Media panel badge: images that arrived while the tab's panel was collapsed */
+    .tab-media-badge {
+      flex-shrink: 0; min-width: 14px; height: 14px; padding: 0 4px; margin-left: 4px;
+      border-radius: 7px; background: var(--tab-accent); color: #fff;
+      font-size: 9.5px; font-weight: 600; line-height: 14px; text-align: center;
+    }
+    .tab.active .tab-media-badge { opacity: 0.85; }
+
+    .tab.flashing {
+      animation: flash 0.8s ease-in-out infinite alternate;
+    }
+    @keyframes flash {
+      from { background: transparent; }
+      to { background: #3a2a10; border-bottom-color: var(--tab-star); }
+    }
+
+    /* Context menu */
+    #context-menu {
+      position: fixed; display: none; z-index: 1000;
+      background: var(--tab-hover-bg); border: 1px solid var(--tab-border); border-radius: 4px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.5); padding: 4px 0; min-width: 140px;
+    }
+    #context-menu .menu-item {
+      padding: 6px 16px; font-size: 12px; color: var(--tab-fg); cursor: pointer;
+    }
+    #context-menu .menu-item:hover {
+      background: var(--tab-accent); color: #fff;
+    }
+    #context-menu .menu-separator {
+      height: 1px; margin: 4px 8px; background: var(--tab-border);
+    }
+
+  </style>
+</head>
+<body>
+  <div id="tab-bar"></div>
+  <div id="context-menu"></div>
+  <script>
+    const bar = document.getElementById('tab-bar');
+    let currentTabs = [];
+    let editingTabId = null; // tab currently being renamed — skip re-render for it
+
+    // ── Theme support ──
+    function applyTabBarTheme(themeData) {
+      const { terminal, ui } = themeData;
+      const r = document.documentElement.style;
+      r.setProperty('--tab-bar-bg', ui.deepBg || ui.tabBarBg);
+      r.setProperty('--tab-fg', terminal.foreground);
+      r.setProperty('--tab-inactive', ui.mutedText);
+      r.setProperty('--tab-hover-bg', ui.headerBg);
+      r.setProperty('--tab-hover-fg', ui.accentHover);
+      r.setProperty('--tab-active-bg', terminal.background);
+      r.setProperty('--tab-accent', ui.accent);
+      r.setProperty('--tab-border', ui.borderColor);
+      r.setProperty('--tab-muted', ui.mutedText);
+      r.setProperty('--tab-danger', ui.danger);
+      r.setProperty('--tab-star', ui.starColor);
+    }
+
+    // Load theme on startup
+    if (window.electronAPI?.getTheme) {
+      window.electronAPI.getTheme().then(applyTabBarTheme);
+    }
+
+    // Update theme when settings change
+    if (window.electronAPI?.onSettingsUpdated) {
+      window.electronAPI.onSettingsUpdated(() => {
+        if (window.electronAPI.getTheme) {
+          window.electronAPI.getTheme().then(applyTabBarTheme);
+        }
+      });
+    }
+
+    // ── Mouse-based drag state ──
+    let dragState = null;
+    const DRAG_THRESHOLD = 5;
+
+    window.electronAPI.onTabsUpdated((tabs) => {
+      currentTabs = tabs;
+      if (editingTabId != null) return; // don't blow away the rename input mid-edit
+      render();
+    });
+
+    // Pull initial tab state — push via sendTabsUpdate races against page load
+    if (window.electronAPI.getTabs) {
+      window.electronAPI.getTabs().then((tabs) => {
+        if (tabs && tabs.length) { currentTabs = tabs; render(); }
+      });
+    }
+
+    // A strip that changed size has no valid frozen widths to restore.
+    new ResizeObserver(() => { unfreezeLayout(); updateCompressedState(); }).observe(bar);
+
+    const MAX_TAB_WIDTH = 240;
+
+    // ── Hover freeze (Chrome-style) ──
+    // While the pointer is in the strip, tab widths do not re-flow, so the close
+    // button under the cursor stays put when tabs open or close. New tabs are
+    // appended at natural width and overflow off-screen until the cursor leaves.
+    let frozenWidths = null;      // Map<tabId, px> — null means not frozen
+    let frozenCompressed = false; // the .tab-bar-compressed value captured at freeze
+
+    function freezeLayout() {
+      if (frozenWidths) return;
+      const widths = new Map();
+      bar.querySelectorAll('.tab').forEach((el) => {
+        const tab = currentTabs[parseInt(el.dataset.index)];
+        if (tab) widths.set(tab.id, el.offsetWidth);
+      });
+      if (widths.size === 0) return;
+      frozenCompressed = bar.classList.contains('tab-bar-compressed');
+      frozenWidths = widths;
+      applyFrozenLayout();
+    }
+
+    function applyFrozenLayout() {
+      if (!frozenWidths) return;
+      bar.querySelectorAll('.tab').forEach((el) => {
+        const tab = currentTabs[parseInt(el.dataset.index)];
+        const width = tab ? frozenWidths.get(tab.id) : undefined;
+        if (width == null) return; // created during the freeze: natural width, overflows
+        el.style.flex = `0 0 ${width}px`;
+        el.style.maxWidth = 'none';
+      });
+      // The compressed class moves the × to position:absolute — recomputing it
+      // mid-hover would shift the button even with every width pinned.
+      bar.classList.toggle('tab-bar-compressed', frozenCompressed);
+    }
+
+    function unfreezeLayout() {
+      if (!frozenWidths) return;
+      frozenWidths = null;
+      bar.querySelectorAll('.tab').forEach((el) => {
+        el.style.flex = '';
+        el.style.maxWidth = '';
+      });
+      updateCompressedState();
+    }
+
+    bar.addEventListener('mouseenter', freezeLayout);
+    bar.addEventListener('mouseleave', unfreezeLayout);
+    // Backstop: the tab bar is its own Electron view, so mouseleave can be
+    // missed when the cursor drops into the terminal. Never stay frozen forever.
+    window.addEventListener('blur', unfreezeLayout);
+
+    function updateCompressedState() {
+      if (frozenWidths) return; // frozen: the class is pinned to frozenCompressed
+      const unpinnedTabs = Array.from(bar.querySelectorAll('.tab:not(.pinned)'));
+      if (unpinnedTabs.length === 0) { bar.classList.remove('tab-bar-compressed'); return; }
+      // Only hide close buttons when tabs have been squeezed below their max width
+      const isCompressed = unpinnedTabs.some(el => el.offsetWidth < MAX_TAB_WIDTH - 1);
+      bar.classList.toggle('tab-bar-compressed', isCompressed);
+    }
+
+    function render() {
+      bar.innerHTML = '';
+      // Find last pinned tab index for separator
+      let lastPinnedIdx = -1;
+      currentTabs.forEach((tab, i) => { if (tab.pinned) lastPinnedIdx = i; });
+
+      currentTabs.forEach((tab, index) => {
+        const el = document.createElement('div');
+        el.className = 'tab'
+          + (tab.active ? ' active' : '')
+          + (tab.flashing ? ' flashing' : '')
+          + (tab.muted ? ' muted' : '')
+          + (tab.pinned ? ' pinned' : '')
+          + (tab.pinned && index === lastPinnedIdx && lastPinnedIdx < currentTabs.length - 1 ? ' last-pinned' : '');
+        el.dataset.index = index;
+
+        // All tabs support drag (pinned tabs drag within pinned section)
+        el.addEventListener('mousedown', onMouseDown);
+
+        if (tab.agentColor) {
+          const dot = document.createElement('span');
+          dot.className = 'tab-agent-dot';
+          dot.style.background = tab.agentColor;
+          el.appendChild(dot);
+        }
+
+        const label = document.createElement('span');
+        label.className = 'tab-label';
+        label.textContent = tab.title;
+        el.appendChild(label);
+
+        if (tab.newMedia > 0) {
+          const badge = document.createElement('span');
+          badge.className = 'tab-media-badge';
+          badge.textContent = tab.newMedia > 99 ? '99+' : String(tab.newMedia);
+          badge.title = tab.newMedia === 1 ? '1 new image' : tab.newMedia + ' new images';
+          el.appendChild(badge);
+        }
+
+        el.title = tab.title;
+
+        if (!tab.pinned) {
+          const close = document.createElement('button');
+          close.className = 'tab-close';
+          close.textContent = '\u00d7';
+          close.addEventListener('mousedown', (e) => {
+            e.stopPropagation();
+            window.electronAPI.closeTab(tab.id);
+          });
+          el.appendChild(close);
+        }
+
+        bar.appendChild(el);
+      });
+
+      // Drag handle spacer — always present so there's a grabbable area
+      const spacer = document.createElement('div');
+      spacer.className = 'drag-spacer';
+      bar.appendChild(spacer);
+
+      // innerHTML = '' dropped the inline widths; re-pin them if frozen
+      applyFrozenLayout();
+
+      // Check if tabs are compressed after layout
+      requestAnimationFrame(updateCompressedState);
+
+      // Re-apply drag state when a tabs-updated re-render happens mid-drag
+      if (dragState) {
+        const newIndex = currentTabs.findIndex(t => t.id === dragState.tabId);
+        if (newIndex >= 0) {
+          dragState.index = newIndex;
+          dragState.el = bar.children[newIndex];
+          if (dragState.moved) dragState.el.classList.add('dragging');
+        }
+      }
+    }
+
+    function isOutsideWindow(x, y) {
+      return y < -10 || y > window.innerHeight + 10
+          || x < -10 || x > window.innerWidth + 10;
+    }
+
+    function isNearTabBar(clientY) {
+      const barRect = bar.getBoundingClientRect();
+      return clientY >= -40 && clientY <= barRect.height + 40;
+    }
+
+    function onMouseDown(e) {
+      if (e.button !== 0) return;
+      if (editingTabId != null) return; // no drag/click-switch while renaming
+      const el = e.currentTarget;
+      const index = parseInt(el.dataset.index);
+      dragState = {
+        index,
+        tabId: currentTabs[index].id,
+        startX: e.screenX,
+        startY: e.screenY,
+        el,
+        moved: false,
+        title: currentTabs[index].title,
+        outside: false,
+        sourceHidden: false,
+      };
+      document.addEventListener('mousemove', onMouseMove);
+      document.addEventListener('mouseup', onMouseUp);
+    }
+
+    function onMouseMove(e) {
+      if (!dragState) return;
+      const dx = e.screenX - dragState.startX;
+      const dy = e.screenY - dragState.startY;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+
+      if (!dragState.moved && dist > DRAG_THRESHOLD) {
+        const lockedCheck = currentTabs.find(t => t.id === dragState.tabId);
+        if (lockedCheck && lockedCheck.locked) return;
+        dragState.moved = true;
+        dragState.el.classList.add('dragging');
+        window.electronAPI.expandTabBar();
+        window.electronAPI.showDragGhost(dragState.title, e.screenX, e.screenY);
+      }
+
+      if (!dragState.moved) return;
+
+      // Ghost follows cursor throughout the entire drag
+      window.electronAPI.moveDragGhost(e.screenX, e.screenY);
+
+      const outside = isOutsideWindow(e.clientX, e.clientY);
+
+      const draggedTab = currentTabs.find(t => t.id === dragState.tabId);
+
+      if (outside) {
+        dragState.outside = true;
+        clearIndicators();
+        // Send position to main process for cross-window tab bar snapping
+        window.electronAPI.dragForeignMove(e.screenX, e.screenY);
+        // Hide source window when dragging the only tab off (not pinned tabs)
+        if (!dragState.sourceHidden && currentTabs.length <= 1 && draggedTab && !draggedTab.pinned) {
+          window.electronAPI.hideForDrag();
+          dragState.sourceHidden = true;
+        }
+      } else {
+        if (dragState.outside) {
+          // Was outside, now back inside — clear foreign drag state
+          window.electronAPI.dragForeignEnd();
+        }
+        dragState.outside = false;
+        // Don't re-show a hidden source window mid-drag; it will be
+        // restored on drop-inside or closed on drop-outside.
+        // Reorder indicators when cursor is over the tab bar
+        clearIndicators();
+        if (isNearTabBar(e.clientY)) {
+          const hoverEl = getTabAtX(e.clientX);
+          if (hoverEl) {
+            const hoverIndex = parseInt(hoverEl.dataset.index);
+            const hoverTab = currentTabs[hoverIndex];
+            // Only show indicator when dragging within the same section (pinned↔pinned, unpinned↔unpinned)
+            if (hoverIndex !== dragState.index && draggedTab && hoverTab
+                && draggedTab.pinned === hoverTab.pinned
+                && !draggedTab.locked && !hoverTab.locked) {
+              const rect = hoverEl.getBoundingClientRect();
+              const midX = rect.left + rect.width / 2;
+              hoverEl.classList.add(e.clientX < midX ? 'drag-over-left' : 'drag-over-right');
+            }
+          }
+        }
+      }
+    }
+
+    function onMouseUp(e) {
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup', onMouseUp);
+
+      if (!dragState) return;
+      const { index, el, moved, sourceHidden } = dragState;
+      el.classList.remove('dragging');
+      clearIndicators();
+      window.electronAPI.hideDragGhost();
+
+      if (!moved) {
+        window.electronAPI.dragForeignEnd();
+        window.electronAPI.switchTab(currentTabs[index].id);
+        dragState = null;
+        return;
+      }
+
+      window.electronAPI.collapseTabBar();
+
+      const outside = isOutsideWindow(e.clientX, e.clientY);
+
+      const draggedTab = currentTabs.find(t => t.id === dragState.tabId);
+
+      if (outside) {
+        if (draggedTab && !draggedTab.pinned) {
+          // detachTab reads foreignDragTarget for insert position — don't clear it beforehand
+          window.electronAPI.detachTab(dragState.tabId, e.screenX, e.screenY);
+        } else {
+          window.electronAPI.dragForeignEnd();
+        }
+        if (sourceHidden) window.electronAPI.showAfterDrag();
+        dragState = null;
+        return;
+      }
+
+      // Dropped back inside — clean up foreign drag state and restore source
+      window.electronAPI.dragForeignEnd();
+      if (sourceHidden) {
+        window.electronAPI.showAfterDrag();
+      }
+
+      // Reorder within bar (moveTab enforces pinned/unpinned boundary)
+      if (isNearTabBar(e.clientY)) {
+        const hoverEl = getTabAtX(e.clientX);
+        if (hoverEl) {
+          const targetIndex = parseInt(hoverEl.dataset.index);
+          if (targetIndex !== index) {
+            window.electronAPI.moveTab(index, targetIndex);
+          }
+        }
+      }
+
+      dragState = null;
+    }
+
+    function getTabAtX(clientX) {
+      for (const child of bar.children) {
+        const rect = child.getBoundingClientRect();
+        if (clientX >= rect.left && clientX <= rect.right) return child;
+      }
+      return null;
+    }
+
+    function clearIndicators() {
+      bar.querySelectorAll('.drag-over-left, .drag-over-right').forEach(el => {
+        el.classList.remove('drag-over-left', 'drag-over-right');
+      });
+    }
+
+    // ── Cross-window tab bar snap (receive indicators from foreign drag) ──
+
+    window.electronAPI.onForeignDragOver((clientX) => {
+      clearIndicators();
+      const pinnedCount = currentTabs.filter(t => t.pinned).length;
+      const hoverEl = getTabAtX(clientX);
+
+      if (hoverEl) {
+        const hoverIndex = parseInt(hoverEl.dataset.index);
+        const hoverTab = currentTabs[hoverIndex];
+
+        if (hoverTab && !hoverTab.pinned) {
+          // Over an unpinned tab — show left/right indicator
+          const rect = hoverEl.getBoundingClientRect();
+          const midX = rect.left + rect.width / 2;
+          const side = clientX < midX ? 'left' : 'right';
+          hoverEl.classList.add('drag-over-' + side);
+          window.electronAPI.foreignDragIndex(side === 'left' ? hoverIndex : hoverIndex + 1);
+        } else if (pinnedCount < currentTabs.length) {
+          // Over a pinned tab — show indicator at start of unpinned section
+          bar.children[pinnedCount].classList.add('drag-over-left');
+          window.electronAPI.foreignDragIndex(pinnedCount);
+        } else {
+          // All tabs are pinned — insert at end
+          window.electronAPI.foreignDragIndex(currentTabs.length);
+        }
+      } else {
+        // Cursor past all tabs — insert at end
+        window.electronAPI.foreignDragIndex(currentTabs.length);
+      }
+    });
+
+    window.electronAPI.onForeignDragLeave(() => {
+      clearIndicators();
+    });
+
+    // ── Rename tab (inline input replaces label) ──
+    function startRename(tab, tabEl) {
+      const label = tabEl.querySelector('.tab-label');
+      if (!label) return;
+      editingTabId = tab.id;
+
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.className = 'tab-rename';
+      input.value = tab.title;
+      input.maxLength = 120;
+      // Don't let mousedown bubble into the tab's drag handler
+      input.addEventListener('mousedown', (e) => e.stopPropagation());
+
+      label.replaceWith(input);
+      // Defer focus/select until the element is in the DOM and layout has settled,
+      // otherwise Electron sometimes drops focus to the terminal webview.
+      requestAnimationFrame(() => { input.focus(); input.select(); });
+
+      let done = false;
+      const finish = (commit) => {
+        if (done) return;
+        done = true;
+        editingTabId = null;
+        if (commit) {
+          const v = input.value.trim();
+          if (v && v !== tab.title) {
+            // Optimistically update local state so render() doesn't flash the old title
+            const local = currentTabs.find(t => t.id === tab.id);
+            if (local) local.title = v;
+            window.electronAPI.renameTab(tab.id, v);
+          }
+        }
+        render();
+      };
+
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+        else if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+      });
+      input.addEventListener('blur', () => finish(true));
+    }
+
+    // ── Context menu (overlays terminal via tab-bar-expand) ──
+    const ctxMenu = document.getElementById('context-menu');
+    let menuOpen = false;
+
+    function dismissContextMenu() {
+      if (!menuOpen) return;
+      ctxMenu.style.display = 'none';
+      menuOpen = false;
+      window.electronAPI.collapseTabBar();
+    }
+
+    bar.addEventListener('contextmenu', async (e) => {
+      e.preventDefault();
+      const tabEl = e.target.closest('.tab');
+      if (!tabEl) return;
+      const index = parseInt(tabEl.dataset.index);
+      const tab = currentTabs[index];
+      if (!tab) return;
+
+      ctxMenu.innerHTML = '';
+
+      // Rename tab
+      const renameItem = document.createElement('div');
+      renameItem.className = 'menu-item';
+      renameItem.textContent = 'Rename tab';
+      renameItem.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        const tabEl = bar.querySelector('.tab[data-index="' + index + '"]');
+        dismissContextMenu();
+        if (tabEl) startRename(tab, tabEl);
+      });
+      ctxMenu.appendChild(renameItem);
+
+      // Pin / Unpin (not for locked tabs)
+      if (!tab.locked) {
+        const pinItem = document.createElement('div');
+        pinItem.className = 'menu-item';
+        pinItem.textContent = tab.pinned ? 'Unpin tab' : 'Pin tab';
+        pinItem.addEventListener('click', (ev) => {
+          ev.stopPropagation();
+          window.electronAPI.pinTab(tab.id);
+          dismissContextMenu();
+        });
+        ctxMenu.appendChild(pinItem);
+      }
+
+      // Mute / Unmute
+      const muteItem = document.createElement('div');
+      muteItem.className = 'menu-item';
+      muteItem.textContent = tab.muted ? 'Unmute tab' : 'Mute tab';
+      muteItem.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        window.electronAPI.muteTab(tab.id);
+        dismissContextMenu();
+      });
+      ctxMenu.appendChild(muteItem);
+
+      // Close tab (not for locked tabs)
+      if (!tab.locked) {
+        const sep = document.createElement('div');
+        sep.className = 'menu-separator';
+        ctxMenu.appendChild(sep);
+
+        const closeItem = document.createElement('div');
+        closeItem.className = 'menu-item';
+        closeItem.textContent = 'Close tab';
+        closeItem.addEventListener('click', (ev) => {
+          ev.stopPropagation();
+          window.electronAPI.closeTab(tab.id);
+          dismissContextMenu();
+        });
+        ctxMenu.appendChild(closeItem);
+      }
+
+      // Expand tab bar view to full window so menu can draw over terminal
+      await window.electronAPI.expandTabBar();
+      menuOpen = true;
+
+      ctxMenu.style.left = e.clientX + 'px';
+      ctxMenu.style.top = e.clientY + 'px';
+      ctxMenu.style.display = 'block';
+
+      // Clamp if overflowing right edge
+      const rect = ctxMenu.getBoundingClientRect();
+      if (rect.right > window.innerWidth) {
+        ctxMenu.style.left = (window.innerWidth - rect.width - 4) + 'px';
+      }
+    });
+
+    document.addEventListener('mousedown', (e) => {
+      if (menuOpen && !e.target.closest('#context-menu')) {
+        dismissContextMenu();
+      }
+    });
+    document.addEventListener('contextmenu', (e) => {
+      if (!e.target.closest('.tab') && menuOpen) {
+        dismissContextMenu();
+      }
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && menuOpen) {
+        dismissContextMenu();
+      }
+    });
+  </script>
+</body>
+</html>

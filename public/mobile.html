@@ -1,0 +1,780 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>ai-tabs remote</title>
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="manifest" href="/manifest.json">
+  <link rel="stylesheet" href="/xterm/css/xterm.css">
+  <style>
+    :root {
+      --bg: #1a1a2e;       --fg: #e0e0e0;
+      --accent: #9d7ee0;   --accent-hover: #c5a5ff;
+      --header-bg: #16213e; --card-bg: #1f2a48;
+      --border: #2a3a5c;   --muted: #5c6370;
+      --input-bg: #1a2745; --success: #50c878;
+      --danger: #e05555;   --warning: #e8a838;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body {
+      height: 100%; background: var(--bg); color: var(--fg);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      -webkit-tap-highlight-color: transparent;
+      overflow: hidden;
+    }
+
+    /* ── Auth screen ── */
+    .auth-screen {
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      height: 100%; padding: 24px; gap: 16px;
+    }
+    .auth-screen h1 { font-size: 20px; color: var(--accent-hover); }
+    .auth-screen input {
+      width: 100%; max-width: 360px; padding: 14px 16px;
+      background: var(--input-bg); border: 1px solid var(--border); border-radius: 8px;
+      color: var(--fg); font-size: 16px; outline: none;
+    }
+    .auth-screen input:focus { border-color: var(--accent); }
+    .auth-screen button {
+      width: 100%; max-width: 360px; padding: 14px;
+      background: var(--accent); border: none; border-radius: 8px;
+      color: white; font-size: 16px; font-weight: 600; cursor: pointer;
+      min-height: 48px;
+    }
+    .auth-screen .error { color: var(--danger); font-size: 14px; }
+
+    /* ── App shell ── */
+    .app { display: flex; flex-direction: column; height: 100%; }
+
+    .top-bar {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 12px 16px; background: var(--header-bg);
+      border-bottom: 1px solid var(--border);
+      min-height: 48px; flex-shrink: 0;
+    }
+    .top-bar h1 { font-size: 16px; font-weight: 600; }
+    .top-bar .back-btn {
+      background: none; border: none; color: var(--accent-hover);
+      font-size: 14px; cursor: pointer; padding: 8px 12px; min-height: 44px;
+      min-width: 44px; display: flex; align-items: center;
+    }
+    .top-bar .status-dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      display: inline-block; margin-right: 8px; flex-shrink: 0;
+    }
+    .top-bar .status-dot.idle { background: var(--warning); }
+    .top-bar .status-dot.active { background: var(--success); }
+
+    /* ── Session list ── */
+    .session-list {
+      flex: 1; overflow-y: auto; padding: 12px;
+      -webkit-overflow-scrolling: touch;
+    }
+    .session-card {
+      background: var(--card-bg); border: 1px solid var(--border); border-radius: 10px;
+      padding: 14px 16px; margin-bottom: 10px; cursor: pointer;
+      transition: border-color 0.15s; min-height: 72px;
+      display: flex; flex-direction: column; gap: 6px;
+    }
+    .session-card:active { border-color: var(--accent); }
+    .session-card .card-top {
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    .session-card .project-name {
+      font-size: 15px; font-weight: 600; color: var(--accent-hover);
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .session-card .badge {
+      font-size: 11px; font-weight: 600; padding: 3px 8px; border-radius: 4px;
+      text-transform: uppercase; flex-shrink: 0;
+    }
+    .badge.idle { background: rgba(232,168,56,0.15); color: var(--warning); }
+    .badge.active { background: rgba(80,200,120,0.15); color: var(--success); }
+    .session-card .last-line {
+      font-size: 12px; color: var(--muted); overflow: hidden;
+      text-overflow: ellipsis; white-space: nowrap;
+      font-family: 'Cascadia Code', 'Consolas', monospace;
+    }
+    .session-card .meta {
+      font-size: 11px; color: #3d4a63;
+    }
+
+    .empty-state {
+      text-align: center; padding: 48px 24px; color: var(--muted); font-size: 14px;
+    }
+
+    /* ── Session detail ── */
+    .detail-view { display: flex; flex-direction: column; flex: 1; overflow: hidden; }
+
+    .terminal-pane {
+      flex: 1; position: relative; overflow: hidden;
+      background: #0f0f1e;
+    }
+    .terminal-pane .xterm { height: 100%; }
+    .terminal-pane .xterm-viewport { overflow-y: auto !important; }
+
+    .input-bar {
+      display: flex; gap: 8px; padding: 10px 12px;
+      background: var(--header-bg); border-top: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+    .input-bar input {
+      flex: 1; padding: 12px 14px;
+      background: var(--input-bg); border: 1px solid var(--border); border-radius: 8px;
+      color: var(--fg); font-size: 16px; outline: none;
+      min-height: 48px;
+    }
+    .input-bar input:focus { border-color: var(--accent); }
+    .input-bar .send-btn {
+      background: var(--accent); border: none; border-radius: 8px;
+      color: white; font-size: 14px; font-weight: 600; padding: 0 18px;
+      cursor: pointer; min-height: 48px; min-width: 60px;
+    }
+
+    .quick-btn {
+      padding: 10px 18px; border-radius: 8px; border: 1px solid var(--border);
+      background: var(--input-bg); color: var(--fg); font-size: 14px;
+      cursor: pointer; min-height: 44px; min-width: 44px;
+      display: flex; align-items: center; justify-content: center;
+      font-weight: 500;
+    }
+    .quick-btn.approve { border-color: var(--success); color: var(--success); flex: 1; }
+    .quick-btn.reject { border-color: var(--danger); color: var(--danger); flex: 1; }
+    .quick-btn.approve:disabled, .quick-btn.reject:disabled {
+      opacity: 0.4; pointer-events: none;
+    }
+    .quick-btn.approve.sent { background: rgba(80,200,120,0.15); }
+    .quick-btn.reject.sent { background: rgba(224,85,85,0.15); }
+    .permission-bar {
+      display: flex; gap: 8px; padding: 8px 12px;
+      background: var(--header-bg); border-top: 1px solid var(--border);
+      flex-shrink: 0;
+      animation: slideUp 0.2s ease-out;
+    }
+    @keyframes slideUp {
+      from { transform: translateY(100%); opacity: 0; }
+      to { transform: translateY(0); opacity: 1; }
+    }
+
+    /* ── New session button ── */
+    .new-session-btn {
+      display: flex; align-items: center; justify-content: center; gap: 8px;
+      width: 100%; padding: 14px; margin-bottom: 12px;
+      background: var(--input-bg); border: 2px dashed var(--border); border-radius: 10px;
+      color: var(--accent-hover); font-size: 15px; font-weight: 600;
+      cursor: pointer; min-height: 52px;
+      transition: border-color 0.15s, background 0.15s;
+    }
+    .new-session-btn:active { border-color: var(--accent); background: var(--card-bg); }
+
+    /* ── Project picker overlay ── */
+    .picker-overlay {
+      position: fixed; inset: 0; z-index: 100;
+      background: rgba(0,0,0,0.6); display: flex; flex-direction: column;
+    }
+    .picker-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 14px 16px; background: var(--header-bg);
+      border-bottom: 1px solid var(--border);
+    }
+    .picker-header h2 { font-size: 16px; font-weight: 600; }
+    .picker-close {
+      background: none; border: none; color: var(--muted); font-size: 24px;
+      cursor: pointer; padding: 8px; min-width: 44px; min-height: 44px;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .picker-search {
+      margin: 12px; padding: 12px 14px;
+      background: var(--input-bg); border: 1px solid var(--border); border-radius: 8px;
+      color: var(--fg); font-size: 16px; outline: none; width: calc(100% - 24px);
+    }
+    .picker-search:focus { border-color: var(--accent); }
+    .picker-list {
+      flex: 1; overflow-y: auto; padding: 0 12px 12px;
+      -webkit-overflow-scrolling: touch;
+    }
+    .picker-item {
+      display: flex; align-items: center; gap: 10px;
+      padding: 14px 16px; margin-bottom: 6px;
+      background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px;
+      cursor: pointer; min-height: 48px; transition: border-color 0.15s;
+    }
+    .picker-item:active { border-color: var(--accent); }
+    .picker-item .item-name {
+      font-size: 15px; font-weight: 500; color: var(--accent-hover);
+    }
+    .picker-item .item-star { color: var(--warning); font-size: 14px; flex-shrink: 0; }
+
+    /* ── Hidden ── */
+    .hidden { display: none !important; }
+
+    /* ── Loading spinner ── */
+    .loading { text-align: center; padding: 48px; color: var(--muted); }
+  </style>
+</head>
+<body>
+
+<div id="auth-screen" class="auth-screen">
+  <h1>ai-tabs remote</h1>
+  <input type="password" id="auth-key-input" placeholder="Password" autocomplete="current-password">
+  <button id="auth-submit">Connect</button>
+  <div class="error hidden" id="auth-error"></div>
+</div>
+
+<div id="app" class="app hidden">
+  <!-- Top bar -->
+  <div class="top-bar">
+    <button class="back-btn hidden" id="back-btn">&larr; Sessions</button>
+    <h1 id="top-title">ai-tabs</h1>
+    <div id="top-right"></div>
+  </div>
+
+  <!-- Session list view -->
+  <div class="session-list" id="session-list">
+    <div class="loading">Loading sessions...</div>
+  </div>
+
+  <!-- Project picker overlay -->
+  <div class="picker-overlay hidden" id="project-picker">
+    <div class="picker-header">
+      <h2>New Session</h2>
+      <button class="picker-close" id="picker-close">&times;</button>
+    </div>
+    <input type="text" class="picker-search" id="picker-search" placeholder="Search projects..." autocomplete="off">
+    <div class="picker-list" id="picker-list"></div>
+  </div>
+
+  <!-- Session detail view -->
+  <div class="detail-view hidden" id="detail-view">
+    <div class="terminal-pane" id="terminal-pane"></div>
+
+    <div class="permission-bar hidden" id="permission-bar">
+      <button class="quick-btn approve" id="btn-approve">Approve</button>
+      <button class="quick-btn reject" id="btn-reject">Reject</button>
+    </div>
+
+    <div class="input-bar">
+      <input type="text" id="msg-input" placeholder="Type a message..." autocomplete="off" autocapitalize="none" spellcheck="false" enterkeyhint="send">
+      <button class="send-btn" id="btn-send">Send</button>
+    </div>
+  </div>
+</div>
+
+<script src="/xterm/lib/xterm.js"></script>
+<script src="/xterm/lib/addon-fit/addon-fit.js"></script>
+<script src="/xterm/lib/addon-unicode11/addon-unicode11.js"></script>
+<script src="/xterm/lib/addon-web-links/addon-web-links.js"></script>
+<script>
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('/sw.js').catch(() => {});
+  }
+
+  // ── State ──
+  let authKey = localStorage.getItem('aitabs-auth-key') || localStorage.getItem('cctabs-auth-key') || '';
+  let ws = null;
+  let currentSessionId = null;
+  let term = null;
+  let fitAddon = null;
+  let refreshTimer = null;
+  let allProjects = [];
+  let favorites = new Set();
+
+  // ── DOM refs ──
+  const $authScreen = document.getElementById('auth-screen');
+  const $authInput = document.getElementById('auth-key-input');
+  const $authSubmit = document.getElementById('auth-submit');
+  const $authError = document.getElementById('auth-error');
+  const $app = document.getElementById('app');
+  const $backBtn = document.getElementById('back-btn');
+  const $topTitle = document.getElementById('top-title');
+  const $sessionList = document.getElementById('session-list');
+  const $detailView = document.getElementById('detail-view');
+  const $terminalPane = document.getElementById('terminal-pane');
+  const $msgInput = document.getElementById('msg-input');
+  const $btnSend = document.getElementById('btn-send');
+  const $btnApprove = document.getElementById('btn-approve');
+  const $btnReject = document.getElementById('btn-reject');
+  const $permissionBar = document.getElementById('permission-bar');
+
+  // ── Auth ──
+  function authHeaders() {
+    return { 'Authorization': `Bearer ${authKey}`, 'Content-Type': 'application/json' };
+  }
+
+  async function tryAuth(key) {
+    try {
+      const res = await fetch('/api/health', { headers: { 'Authorization': `Bearer ${key}` } });
+      return res.ok;
+    } catch { return false; }
+  }
+
+  async function handleAuth() {
+    const key = $authInput.value.trim();
+    if (!key) return;
+    if (await tryAuth(key)) {
+      authKey = key;
+      localStorage.setItem('aitabs-auth-key', key);
+      showApp();
+    } else {
+      $authError.textContent = 'Invalid key or server unreachable';
+      $authError.classList.remove('hidden');
+    }
+  }
+
+  $authSubmit.addEventListener('click', handleAuth);
+  $authInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') handleAuth(); });
+
+  async function checkAuthStatus() {
+    try {
+      const res = await fetch('/api/auth-status');
+      if (!res.ok) return null;
+      return await res.json();
+    } catch { return null; }
+  }
+
+  (async () => {
+    const status = await checkAuthStatus();
+    if (status && !status.passwordSet) {
+      $authError.textContent = 'No password set. Open ai-tabs on the server machine and set one in Settings.';
+      $authError.classList.remove('hidden');
+      $authInput.disabled = true;
+      $authSubmit.disabled = true;
+      $authScreen.classList.remove('hidden');
+      return;
+    }
+    if (authKey && await tryAuth(authKey)) {
+      showApp();
+    } else {
+      $authScreen.classList.remove('hidden');
+    }
+  })();
+
+  // ── App ──
+  function showApp() {
+    $authScreen.classList.add('hidden');
+    $app.classList.remove('hidden');
+    loadSessions();
+    startAutoRefresh();
+    connectWebSocket();
+  }
+
+  function connectWebSocket() {
+    if (ws && ws.readyState <= 1) return;
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    ws = new WebSocket(`${proto}//${location.host}?key=${encodeURIComponent(authKey)}`);
+
+    ws.onopen = () => {
+      if (currentSessionId != null) {
+        ws.send(JSON.stringify({ type: 'attach', sessionId: currentSessionId }));
+      }
+    };
+
+    ws.onmessage = (event) => {
+      let msg;
+      try { msg = JSON.parse(event.data); } catch { return; }
+
+      switch (msg.type) {
+        case 'data':
+          if (term) { term.write(msg.data); term.scrollToBottom(); }
+          // Track data volume — if CC is producing lots of output, it's working (not waiting)
+          if (permissionPending && $btnApprove.disabled) {
+            // User already clicked approve/reject — hide after CC starts responding
+            dataAfterAction += msg.data.length;
+            if (dataAfterAction > 200) {
+              hidePermissionButtons();
+              dataAfterAction = 0;
+            }
+          }
+          break;
+
+        case 'idle':
+        case 'cc-notification':
+          if (currentSessionId == null) loadSessions();
+          else checkForPermissionPrompt();
+          break;
+
+        case 'attached':
+          break;
+
+        case 'exit':
+          if (term) term.write('\r\n\x1b[90m[Process exited]\x1b[0m\r\n');
+          break;
+
+        case 'error':
+          if (term) term.write(`\r\n\x1b[91m[Error: ${msg.message}]\x1b[0m\r\n`);
+          break;
+      }
+    };
+
+    ws.onclose = () => {
+      setTimeout(connectWebSocket, 3000);
+    };
+  }
+
+  // ── Resume when returning to the page ──
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState !== 'visible') return;
+
+    // Reconnect WebSocket if dead
+    if (!ws || ws.readyState > 1) {
+      connectWebSocket();
+    }
+
+    if (currentSessionId != null) {
+      // Re-attach to get fresh output — server sends ring buffer on attach
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'attach', sessionId: currentSessionId }));
+      }
+      // Also check for permission prompts
+      checkForPermissionPrompt();
+    } else {
+      loadSessions();
+    }
+  });
+
+  // ── Session list ──
+  async function loadSessions() {
+    try {
+      const res = await fetch('/api/sessions', { headers: authHeaders() });
+      if (!res.ok) throw new Error('Failed to load sessions');
+      renderSessionList(await res.json());
+    } catch (err) {
+      $sessionList.innerHTML = `<div class="empty-state">Could not load sessions. ${err.message}</div>`;
+    }
+  }
+
+  function renderSessionList(sessions) {
+    const newBtn = '<button class="new-session-btn" id="btn-new-session">+ New Session</button>';
+    if (sessions.length === 0) {
+      $sessionList.innerHTML = newBtn + '<div class="empty-state">No active sessions.</div>';
+      return;
+    }
+    $sessionList.innerHTML = newBtn + sessions.map(s => {
+      const name = s.cwd ? s.cwd.split(/[/\\]/).filter(Boolean).pop() : `Session ${s.id}`;
+      const badgeClass = s.idle ? 'idle' : 'active';
+      const badgeText = s.idle ? 'Idle' : 'Active';
+      return `<div class="session-card" data-id="${s.id}">
+        <div class="card-top">
+          <span class="project-name">${escapeHtml(name)}</span>
+          <span class="badge ${badgeClass}">${badgeText}</span>
+        </div>
+        <div class="last-line">${escapeHtml(s.lastLine || '') || '<span style="color:#3d4a63">No output</span>'}</div>
+        <div class="meta">${formatAge(s.createdAt)} &middot; ${s.clientCount} client${s.clientCount !== 1 ? 's' : ''}</div>
+      </div>`;
+    }).join('');
+  }
+
+  $sessionList.addEventListener('click', (e) => {
+    if (e.target.closest('#btn-new-session')) { showProjectPicker(); return; }
+    const card = e.target.closest('.session-card');
+    if (card) openSession(parseInt(card.dataset.id));
+  });
+
+  // ── Session detail ──
+  async function openSession(id) {
+    currentSessionId = id;
+    hidePermissionButtons();
+
+    $sessionList.classList.add('hidden');
+    $detailView.classList.remove('hidden');
+    $backBtn.classList.remove('hidden');
+
+    // Set title
+    try {
+      const res = await fetch('/api/sessions', { headers: authHeaders() });
+      const sessions = await res.json();
+      const sess = sessions.find(s => s.id === id);
+      if (sess) {
+        const name = sess.cwd ? sess.cwd.split(/[/\\]/).filter(Boolean).pop() : `Session ${id}`;
+        $topTitle.innerHTML = `<span class="status-dot ${sess.idle ? 'idle' : 'active'}"></span>${escapeHtml(name)}`;
+      }
+    } catch {}
+
+    initTerminal();
+
+    // Attach via WebSocket — server sends recent output buffer on attach
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'attach', sessionId: id }));
+    }
+
+    stopAutoRefresh();
+  }
+
+  function closeSession() {
+    currentSessionId = null;
+    $sessionList.classList.remove('hidden');
+    $detailView.classList.add('hidden');
+    $backBtn.classList.add('hidden');
+    $topTitle.textContent = 'ai-tabs';
+    hidePermissionButtons();
+
+    if (term) {
+      term.dispose();
+      term = null;
+      fitAddon = null;
+      $terminalPane.innerHTML = '';
+    }
+
+    loadSessions();
+    startAutoRefresh();
+  }
+
+  $backBtn.addEventListener('click', closeSession);
+
+  // ── Terminal ──
+  function initTerminal() {
+    if (term) {
+      term.dispose();
+      $terminalPane.innerHTML = '';
+    }
+
+    term = new Terminal({
+      cursorBlink: true,
+      fontSize: 13,
+      fontFamily: "'Cascadia Code', 'Consolas', monospace",
+      theme: { background: '#0f0f1e', foreground: '#e0e0e0' },
+      allowProposedApi: true,
+    });
+
+    fitAddon = new FitAddon.FitAddon();
+    term.loadAddon(fitAddon);
+
+    const unicode11Addon = new Unicode11Addon.Unicode11Addon();
+    term.loadAddon(unicode11Addon);
+    term.unicode.activeVersion = '11';
+
+    term.loadAddon(new WebLinksAddon.WebLinksAddon());
+
+    term.open($terminalPane);
+    fitAddon.fit();
+
+    // Terminal input goes through the input bar, not directly from xterm
+    // (xterm is display-only on mobile to avoid virtual keyboard conflicts)
+
+    new ResizeObserver(() => {
+      if (fitAddon) {
+        fitAddon.fit();
+        const dims = fitAddon.proposeDimensions();
+        if (dims && ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'resize', cols: dims.cols, rows: dims.rows }));
+        }
+      }
+    }).observe($terminalPane);
+  }
+
+  // ── Input ──
+  function sendInput(text) {
+    if (!currentSessionId) return;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'data', data: text }));
+    } else {
+      fetch(`/api/sessions/${currentSessionId}/input`, {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({ data: text }),
+      }).catch(() => {});
+    }
+  }
+
+  function doSend() {
+    const text = $msgInput.value;
+    if (!text) return;
+    sendInput(text + '\r');
+    $msgInput.value = '';
+    $msgInput.focus();
+    $btnSend.style.background = '#50c878';
+    setTimeout(() => { $btnSend.style.background = ''; }, 300);
+  }
+
+  $btnSend.addEventListener('click', (e) => { e.preventDefault(); doSend(); });
+  $msgInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.keyCode === 13) { e.preventDefault(); doSend(); }
+  });
+  $msgInput.addEventListener('keypress', (e) => {
+    if (e.key === 'Enter' || e.keyCode === 13) { e.preventDefault(); doSend(); }
+  });
+
+  // ── Permission buttons ──
+  let permissionPending = false;
+  let dataAfterAction = 0;
+
+  /**
+   * Check for a permission prompt by fetching plain text output from the server.
+   * Called when CC goes idle — a likely moment for a permission prompt.
+   */
+  async function checkForPermissionPrompt() {
+    if (!currentSessionId || permissionPending) return;
+    try {
+      const res = await fetch(`/api/sessions/${currentSessionId}/output`, { headers: authHeaders() });
+      if (!res.ok) return;
+      const { output } = await res.json();
+      if (detectPermissionPrompt(output)) {
+        showPermissionButtons();
+      }
+    } catch {}
+  }
+
+  function detectPermissionPrompt(text) {
+    if (!text) return false;
+    const lines = text.split('\n').filter(l => l.trim());
+    const tail = lines.slice(-10).join('\n');
+    return /do you want to (proceed|allow|continue|run|execute)/i.test(tail)
+        || /\(y\/n\)/i.test(tail)
+        || /\by(es)?\/n(o)?\b/i.test(tail)
+        || /press y to/i.test(tail)
+        || /allow this|approve|permission/i.test(tail);
+  }
+
+  function showPermissionButtons() {
+    if (permissionPending) return;
+    permissionPending = true;
+    $btnApprove.disabled = false;
+    $btnReject.disabled = false;
+    $btnApprove.classList.remove('sent');
+    $btnReject.classList.remove('sent');
+    $btnApprove.textContent = 'Approve';
+    $btnReject.textContent = 'Reject';
+    $permissionBar.classList.remove('hidden');
+  }
+
+  function hidePermissionButtons() {
+    permissionPending = false;
+    $permissionBar.classList.add('hidden');
+  }
+
+  function handlePermissionAction(type) {
+    const isApprove = type === 'approve';
+    const $btn = isApprove ? $btnApprove : $btnReject;
+    const $other = isApprove ? $btnReject : $btnApprove;
+    const char = isApprove ? 'y' : 'n';
+
+    $btn.disabled = true;
+    $other.disabled = true;
+    $btn.classList.add('sent');
+    $btn.textContent = isApprove ? 'Approved' : 'Rejected';
+
+    sendInput(char);
+    setTimeout(() => sendInput('\r'), 50);
+    dataAfterAction = 0;
+  }
+
+  $btnApprove.addEventListener('click', () => handlePermissionAction('approve'));
+  $btnReject.addEventListener('click', () => handlePermissionAction('reject'));
+
+  // ── Auto-refresh session list ──
+  function startAutoRefresh() {
+    stopAutoRefresh();
+    refreshTimer = setInterval(loadSessions, 5000);
+  }
+
+  function stopAutoRefresh() {
+    if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
+  }
+
+  // ── Helpers ──
+  function escapeHtml(str) {
+    return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  function formatAge(timestamp) {
+    const sec = Math.floor((Date.now() - timestamp) / 1000);
+    if (sec < 60) return 'just now';
+    if (sec < 3600) return `${Math.floor(sec / 60)}m ago`;
+    if (sec < 86400) return `${Math.floor(sec / 3600)}h ago`;
+    return `${Math.floor(sec / 86400)}d ago`;
+  }
+
+  // ── Project picker ──
+  const $picker = document.getElementById('project-picker');
+  const $pickerList = document.getElementById('picker-list');
+  const $pickerSearch = document.getElementById('picker-search');
+  const $pickerClose = document.getElementById('picker-close');
+
+  async function showProjectPicker() {
+    try {
+      const [projRes, favRes] = await Promise.all([
+        fetch('/api/projects', { headers: authHeaders() }),
+        fetch('/api/favorites', { headers: authHeaders() }),
+      ]);
+      allProjects = await projRes.json();
+      favorites = new Set(await favRes.json());
+    } catch {
+      allProjects = [];
+      favorites = new Set();
+    }
+    $pickerSearch.value = '';
+    renderPickerList('');
+    $picker.classList.remove('hidden');
+    $pickerSearch.focus();
+  }
+
+  function hideProjectPicker() { $picker.classList.add('hidden'); }
+
+  function renderPickerList(filter) {
+    const lower = filter.toLowerCase();
+    const sorted = [...allProjects].sort((a, b) => {
+      const aFav = favorites.has(a.cwd) ? 0 : 1;
+      const bFav = favorites.has(b.cwd) ? 0 : 1;
+      if (aFav !== bFav) return aFav - bFav;
+      return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
+    });
+    const filtered = lower ? sorted.filter(p => p.name.toLowerCase().includes(lower)) : sorted;
+    if (filtered.length === 0) {
+      $pickerList.innerHTML = '<div class="empty-state">No matching projects</div>';
+      return;
+    }
+    $pickerList.innerHTML = filtered.map(p => {
+      const star = favorites.has(p.cwd) ? '<span class="item-star">&#9733;</span>' : '';
+      return `<div class="picker-item" data-cwd="${escapeHtml(p.cwd)}">
+        ${star}<span class="item-name">${escapeHtml(p.name)}</span>
+      </div>`;
+    }).join('');
+  }
+
+  $pickerSearch.addEventListener('input', () => renderPickerList($pickerSearch.value.trim()));
+  $pickerClose.addEventListener('click', hideProjectPicker);
+  $picker.addEventListener('click', (e) => { if (e.target === $picker) hideProjectPicker(); });
+
+  $pickerList.addEventListener('click', (e) => {
+    const item = e.target.closest('.picker-item');
+    if (!item) return;
+    hideProjectPicker();
+    createNewSession(item.dataset.cwd);
+  });
+
+  async function createNewSession(cwd) {
+    try {
+      const res = await fetch('/api/open-tab', {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({ cwd, title: cwd.split(/[/\\]/).filter(Boolean).pop(), agent: true }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        alert(err.error || 'Failed to create session');
+        return;
+      }
+      const { requestId } = await res.json();
+
+      const poll = async (attempts = 0) => {
+        if (attempts > 20) return;
+        const statusRes = await fetch(`/api/requests/${requestId}/status`, { headers: authHeaders() });
+        if (!statusRes.ok) return;
+        const { sessionId } = await statusRes.json();
+        if (sessionId != null) {
+          openSession(sessionId);
+        } else {
+          setTimeout(() => poll(attempts + 1), 500);
+        }
+      };
+      setTimeout(() => poll(), 1000);
+    } catch (err) {
+      alert('Failed to create session: ' + err.message);
+    }
+  }
+</script>
+</body>
+</html>

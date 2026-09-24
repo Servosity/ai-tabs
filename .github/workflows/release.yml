@@ -1,0 +1,169 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  windows-installer:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: Extract version from tag
+        id: version
+        shell: bash
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build installer
+        shell: cmd
+        env:
+          CC_TABS_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DMyAppVersion="%CC_TABS_VERSION%" installer\windows\ai-tabs-setup.iss
+
+      - name: Upload Windows installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: installer/windows/build/ai-tabs-setup-*.exe
+
+  macos-installer:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build .pkg installer
+        env:
+          CC_TABS_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          chmod +x installer/macos/build-pkg.sh
+          chmod +x installer/macos/scripts/preinstall
+          chmod +x installer/macos/scripts/postinstall
+          bash installer/macos/build-pkg.sh
+
+      - name: Upload macOS installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-installer
+          path: installer/macos/build/ai-tabs-*-macos.pkg
+
+  linux-installer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build .deb installer
+        env:
+          CC_TABS_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          chmod +x installer/linux/build-deb.sh
+          bash installer/linux/build-deb.sh
+
+      - name: Upload Linux installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-installer
+          path: installer/linux/build/ai-tabs-*-linux-amd64.deb
+
+  release:
+    needs: [windows-installer, macos-installer, linux-installer]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Need full history + all tags so the "find previous tag" step can
+          # actually find the previous tag — the default shallow checkout has
+          # only the trigger ref, which makes the changelog window collapse to
+          # a single commit.
+          fetch-depth: 0
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Find previous tag
+        id: prev_tag
+        run: |
+          prev=$(git tag --sort=-v:refname | grep '^v' | sed -n '2p')
+          echo "tag=${prev:-$(git rev-list --max-parents=0 HEAD)}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate release notes
+        id: notes
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          PREV="${{ steps.prev_tag.outputs.tag }}"
+          TAG="${GITHUB_REF_NAME}"
+
+          # Collect commits, skip version-bump-only commits
+          FEATURES=""
+          FIXES=""
+          OTHER=""
+
+          while IFS= read -r msg; do
+            [ -z "$msg" ] && continue
+            # Skip pure version bump commits
+            echo "$msg" | grep -qiE '^bump version' && continue
+
+            bullet="- ${msg}"
+            if echo "$msg" | grep -qiE '^(add|new|implement|introduce|create)'; then
+              FEATURES="${FEATURES}${bullet}\n"
+            elif echo "$msg" | grep -qiE '^(fix|resolve|patch|repair|correct)'; then
+              FIXES="${FIXES}${bullet}\n"
+            else
+              OTHER="${OTHER}${bullet}\n"
+            fi
+          done <<< "$(git log "${PREV}..${TAG}" --pretty=format:'%s' --reverse)"
+
+          # Build body
+          BODY=""
+          if [ -n "$FEATURES" ]; then
+            BODY="${BODY}### What's new\n\n${FEATURES}\n"
+          fi
+          if [ -n "$FIXES" ]; then
+            BODY="${BODY}### Fixes\n\n${FIXES}\n"
+          fi
+          if [ -n "$OTHER" ]; then
+            BODY="${BODY}### Other changes\n\n${OTHER}\n"
+          fi
+
+          BODY="${BODY}### Install / Update\n\n"
+          BODY="${BODY}**Windows:** \`irm https://github.com/Servosity/ai-tabs/releases/latest/download/install.ps1 | iex\`\n"
+          BODY="${BODY}**macOS / Linux:** \`curl -fsSL https://github.com/Servosity/ai-tabs/releases/latest/download/install.sh | bash\`\n\n"
+          BODY="${BODY}Or download the installer for your platform below.\n\n"
+          BODY="${BODY}**Full Changelog**: https://github.com/Servosity/ai-tabs/compare/${PREV}...${TAG}"
+
+          # Write to file to avoid escaping issues
+          echo -e "$BODY" > release-notes.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ai-tabs v${{ steps.version.outputs.version }}
+          body_path: release-notes.md
+          files: |
+            dist/windows-installer/ai-tabs-setup-*.exe
+            dist/macos-installer/ai-tabs-*-macos.pkg
+            dist/linux-installer/ai-tabs-*-linux-amd64.deb
+            install.ps1
+            install.sh

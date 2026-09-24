@@ -1,0 +1,2904 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <script>
+    // Fallback for phones with "Request Desktop Site" enabled — the server-side
+    // UA sniff can't see through that, so check viewport + touch here too.
+    (function () {
+      var path = location.pathname;
+      if (path !== '/' && path !== '/index.html') return;
+      if (location.hostname === 'localhost' || location.hostname === '127.0.0.1') return;
+      var narrow = window.innerWidth <= 700;
+      var touch = 'ontouchstart' in window || (navigator.maxTouchPoints || 0) > 0;
+      if (narrow && touch) location.replace('/mobile.html');
+    })();
+  </script>
+  <title>ai-tabs</title>
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="manifest" href="/manifest.json">
+  <link rel="stylesheet" href="/xterm/css/xterm.css">
+  <link rel="stylesheet" href="/media-panel.css">
+  <style>
+    :root {
+      --bg: #1a1a2e;          --fg: #e0e0e0;
+      --accent: #9d7ee0;      --accent-hover: #c5a5ff;
+      --header-bg: #16213e;   --card-hover-bg: #1f2f52;
+      --border: #2a3a5c;      --muted: #5c6370;
+      --input-bg: #1a2745;    --deep-bg: #0f0f1e;
+      --star-color: #e8a838;  --success: #50c878;
+      --danger: #e05555;      --cat-accent: #56b6c2;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { height: 100%; background: var(--bg); color: var(--fg); overflow: hidden;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; }
+
+    /* Terminal fills the entire viewport (minus the statusline when shown) */
+    #terminal { position: absolute; inset: 0; padding: 4px; }
+    .xterm { height: 100%; }
+    .xterm-viewport { overflow-y: auto !important; }
+    /* Theme the terminal scrollbar — the default white track reads as a
+       rendering glitch against dark themes, especially since the media panel
+       moved it off the window edge into the middle of the page. */
+    .xterm-viewport::-webkit-scrollbar { width: 10px; }
+    .xterm-viewport::-webkit-scrollbar-track { background: transparent; }
+    .xterm-viewport::-webkit-scrollbar-thumb {
+      background: var(--border, #2a3a5c); border-radius: 5px;
+      border: 2px solid transparent; background-clip: padding-box;
+    }
+    .xterm-viewport::-webkit-scrollbar-thumb:hover { background-color: var(--accent, #9d7ee0); background-clip: padding-box; }
+    /* Ligatures toggle: DOM renderer only — let the browser shape them */
+    #terminal.ligatures .xterm-rows {
+      font-variant-ligatures: contextual;
+      font-feature-settings: "liga" 1, "calt" 1;
+    }
+
+    /* Per-session status line (context bar, tokens, git branch) */
+    #statusline {
+      position: absolute; left: 0; right: 0; bottom: 0; height: 26px;
+      display: none; align-items: center; gap: 12px; padding: 0 10px;
+      font-family: 'Cascadia Code', Consolas, monospace; font-size: 11.5px;
+      background: var(--sl-bg, #0f0f1e); color: var(--sl-fg, #c8c8c8);
+      border-top: 1px solid var(--sl-border, #2a3a5c);
+      white-space: nowrap; overflow: hidden; user-select: none; z-index: 50;
+    }
+    #statusline.visible { display: flex; }
+    .sl-seg { display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0; }
+    .sl-muted { color: var(--sl-muted, #5c6370); }
+    .sl-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+    .sl-bar {
+      position: relative; width: 130px; height: 8px; border-radius: 4px;
+      overflow: hidden; background: var(--sl-bar-bg, #1c1c2e); flex-shrink: 0;
+    }
+    .sl-bar-track, .sl-bar-fill { position: absolute; top: 0; bottom: 0; left: 0; }
+    .sl-bar-track { right: 0; opacity: 0.22; }
+    .sl-bar-fill { width: 0%; }
+    .sl-pill {
+      padding: 0 6px; border-radius: 8px; border: 1px solid currentColor;
+      font-size: 10.5px; line-height: 15px; opacity: 0.9;
+    }
+
+    /* Shift+Enter flash indicator */
+    #shift-enter-indicator {
+      position: fixed; bottom: 8px; right: 8px; padding: 4px 10px;
+      background: var(--accent); color: white; border-radius: 4px; font-size: 11px;
+      opacity: 0; transition: opacity 0.2s; pointer-events: none; z-index: 100;
+    }
+    #shift-enter-indicator.visible { opacity: 1; }
+
+    /* Oversized-image drop warning toast */
+    #drop-warning {
+      position: fixed; bottom: 8px; left: 50%; transform: translateX(-50%);
+      max-width: 80%; padding: 6px 12px;
+      background: #b45309; color: white; border-radius: 4px; font-size: 12px;
+      text-align: center; opacity: 0; transition: opacity 0.2s;
+      pointer-events: none; z-index: 100;
+    }
+    #drop-warning.visible { opacity: 1; }
+
+    /* Bell flash overlay */
+    #bell-flash {
+      position: fixed; inset: 0; background: rgba(255,255,255,0.06);
+      pointer-events: none; z-index: 200; opacity: 0; transition: opacity 0.1s;
+    }
+    #bell-flash.visible { opacity: 1; }
+
+    /* Ctrl+F scrollback search bar (public/term-search.js) */
+    .term-search {
+      position: fixed; top: 6px; right: 18px; z-index: 120;
+      display: flex; align-items: center; gap: 4px; padding: 4px 6px;
+      background: var(--ts-bg, var(--header-bg)); color: var(--ts-fg, var(--fg));
+      border: 1px solid var(--ts-border, var(--border)); border-radius: 6px;
+      box-shadow: 0 4px 14px rgba(0,0,0,0.35); font-size: 12px;
+    }
+    .term-search[hidden] { display: none; }
+    .term-search .ts-input {
+      width: 200px; padding: 3px 6px; font: inherit; outline: none;
+      background: var(--ts-input-bg, var(--input-bg)); color: inherit;
+      border: 1px solid var(--ts-border, var(--border)); border-radius: 4px;
+    }
+    .term-search .ts-input:focus { border-color: var(--ts-accent, var(--accent)); }
+    .term-search .ts-count {
+      min-width: 48px; text-align: center; font-size: 11px; opacity: 0.8;
+      font-variant-numeric: tabular-nums;
+    }
+    .term-search .ts-count.ts-none { color: var(--danger); opacity: 1; }
+    .term-search button {
+      background: none; border: 1px solid transparent; border-radius: 4px;
+      color: inherit; font: inherit; font-size: 11px; padding: 2px 6px; cursor: pointer;
+      line-height: 1.4;
+    }
+    .term-search button:hover { border-color: var(--ts-border, var(--border)); }
+    .term-search .ts-toggle { font-family: 'Cascadia Code', Consolas, monospace; opacity: 0.65; }
+    .term-search .ts-toggle.on {
+      opacity: 1; color: var(--ts-accent, var(--accent)); border-color: var(--ts-accent, var(--accent));
+    }
+
+    /* Landing page */
+    html.landing-page, html.landing-page body { overflow: auto; }
+    .landing { max-width: 1100px; margin: 0 auto; padding: 0 24px 60px; }
+
+    .landing-header {
+      padding: 32px 0 24px;
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    .landing-header h1 {
+      font-size: 22px; font-weight: 600; margin-bottom: 2px;
+    }
+    .landing-header p {
+      color: var(--muted); font-size: 13px;
+    }
+    .version-label {
+      font-size: 12px; color: var(--muted); font-weight: 500; opacity: 0.7;
+    }
+    /* Favorites bar */
+    .favorites-bar {
+      background: var(--header-bg); border: 1px solid var(--border); border-radius: 10px;
+      padding: 14px 20px; margin-bottom: 28px;
+      min-height: 52px; display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+    }
+    .favorites-bar .empty {
+      color: #3d4a63; font-size: 13px; font-style: italic;
+    }
+    .favorites-bar a {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 6px 14px; background: var(--input-bg); border: 1px solid var(--border);
+      border-radius: 6px; color: var(--accent-hover); text-decoration: none; font-size: 13px;
+      font-weight: 500; transition: background 0.15s, border-color 0.15s;
+      white-space: nowrap;
+    }
+    .favorites-bar a:hover { background: var(--card-hover-bg); border-color: var(--accent); }
+    .favorites-bar a::before {
+      content: '\2605'; color: var(--star-color); font-size: 12px;
+    }
+
+    /* Section label */
+    .section-label {
+      font-size: 12px; font-weight: 600; text-transform: uppercase;
+      letter-spacing: 0.08em; color: var(--muted); margin-bottom: 12px;
+    }
+
+    /* Project card grid */
+    .project-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+      gap: 10px;
+    }
+    .project-card {
+      display: flex; align-items: center; justify-content: space-between;
+      background: var(--header-bg); border: 1px solid var(--border); border-radius: 8px;
+      padding: 10px 12px; transition: border-color 0.15s, box-shadow 0.15s;
+    }
+    .project-card:hover {
+      border-color: #3d4a6e;
+      box-shadow: 0 0 12px rgba(124, 92, 191, 0.08);
+    }
+    .project-card a {
+      color: var(--accent-hover); text-decoration: none; font-size: 13px; font-weight: 500;
+      min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .project-card a:hover { color: #ddc5ff; }
+    .star-btn {
+      background: none; border: none; cursor: pointer;
+      font-size: 16px; line-height: 1; padding: 2px 4px;
+      color: #3d4a63; transition: color 0.15s, transform 0.1s;
+      flex-shrink: 0;
+    }
+    .star-btn:hover { color: var(--star-color); transform: scale(1.15); }
+    .star-btn.active { color: var(--star-color); }
+
+    /* New Project card */
+    .new-project-card {
+      display: flex; align-items: center; justify-content: center;
+      background: var(--header-bg); border: 1px dashed var(--border); border-radius: 8px;
+      padding: 10px 12px; transition: border-color 0.15s, box-shadow 0.15s;
+      cursor: pointer; gap: 6px; color: var(--muted); font-size: 13px; font-weight: 500;
+    }
+    .new-project-card:hover {
+      border-color: var(--accent); color: var(--accent-hover);
+      box-shadow: 0 0 12px rgba(124, 92, 191, 0.08);
+    }
+    .new-project-card .plus { font-size: 16px; line-height: 1; }
+    .new-project-form {
+      display: flex; align-items: center; gap: 6px; width: 100%;
+      background: var(--header-bg); border: 1px solid var(--accent); border-radius: 8px;
+      padding: 6px 10px;
+    }
+    .new-project-form input {
+      flex: 1; background: var(--input-bg); border: 1px solid var(--border); border-radius: 4px;
+      color: var(--fg); font-size: 13px; padding: 6px 10px; outline: none; font-family: inherit;
+    }
+    .new-project-form input:focus { border-color: var(--accent); }
+    .new-project-form button {
+      background: var(--accent); border: none; border-radius: 4px; color: white;
+      font-size: 12px; padding: 6px 12px; cursor: pointer; white-space: nowrap;
+    }
+    .new-project-form button:hover { background: var(--accent-hover); }
+    .new-project-form .cancel-btn {
+      background: none; color: var(--muted); padding: 6px 8px;
+    }
+    .new-project-form .cancel-btn:hover { color: var(--fg); background: none; }
+
+    /* Category tag on each card */
+    .cat-btn {
+      background: none; border: 1px solid var(--border); border-radius: 4px; cursor: pointer;
+      font-size: 10px; padding: 2px 6px; color: var(--muted); margin-right: 4px;
+      transition: border-color 0.15s, color 0.15s; white-space: nowrap;
+      max-width: 80px; overflow: hidden; text-overflow: ellipsis;
+    }
+    .cat-btn:hover { border-color: var(--cat-accent); color: var(--cat-accent); }
+    .cat-btn.assigned { color: var(--cat-accent); border-color: #2a4a5c; }
+
+    /* Category section headers */
+    .category-section { margin-bottom: 24px; }
+    .category-header {
+      font-size: 14px; font-weight: 600; color: #8892a8; margin-bottom: 10px;
+      display: flex; align-items: center; gap: 8px;
+    }
+    .category-header .count {
+      font-size: 11px; font-weight: 400; color: var(--muted);
+    }
+
+    /* Category picker dropdown */
+    .cat-picker {
+      position: fixed; z-index: 200;
+      background: var(--input-bg); border: 1px solid var(--border); border-radius: 8px;
+      padding: 4px 0; min-width: 160px; box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+    }
+    .cat-picker-item {
+      display: block; width: 100%; text-align: left; background: none; border: none;
+      color: var(--accent-hover); font-size: 12px; padding: 7px 14px; cursor: pointer;
+    }
+    .cat-picker-item:hover { background: var(--header-bg); }
+    .cat-picker-item.active { color: var(--cat-accent); }
+    .cat-picker-item.remove { color: var(--danger); }
+    .cat-delete {
+      float: right; margin-left: 12px; color: var(--muted); font-size: 15px;
+      line-height: 1; cursor: pointer;
+    }
+    .cat-delete:hover { color: var(--danger); }
+    .cat-picker-sep { border-top: 1px solid var(--border); margin: 4px 0; }
+    .cat-picker-item.disabled { opacity: 0.4; cursor: default; }
+    .agent-btn {
+      background: none; border: none; cursor: pointer; font-size: 11px;
+      padding: 2px 4px; opacity: 0.5; transition: opacity 0.15s;
+    }
+    .agent-btn:hover, .agent-btn.assigned { opacity: 1; }
+    .gear-btn {
+      background: none; border: none; cursor: pointer;
+      color: var(--fg); opacity: 0.35; font-size: 13px; padding: 2px 4px;
+    }
+    .gear-btn:hover { opacity: 1; }
+    .settings-popover { min-width: 230px; }
+    .settings-popover .sp-label {
+      font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px;
+      opacity: 0.55; padding: 6px 10px 2px;
+    }
+    .settings-popover .sp-error { color: var(--danger); font-size: 11px; padding: 4px 10px; }
+    .settings-popover .sp-launch-option { display: flex; align-items: center; gap: 6px; padding: 4px 10px; }
+    .settings-popover .sp-launch-option select {
+      background: var(--input-bg); border: 1px solid var(--border); border-radius: 4px;
+      color: var(--fg); font-size: 11px; padding: 2px 6px; outline: none;
+    }
+    .settings-popover .cat-picker-item.sp-delete { color: var(--danger); }
+    .cat-picker-input {
+      display: flex; padding: 4px 8px; gap: 4px;
+    }
+    .cat-picker-input input {
+      flex: 1; background: var(--header-bg); border: 1px solid var(--border); border-radius: 4px;
+      color: var(--fg); font-size: 12px; padding: 4px 8px; outline: none;
+    }
+    .cat-picker-input input:focus { border-color: var(--accent); }
+    .cat-picker-input button {
+      background: var(--accent); border: none; border-radius: 4px; color: white;
+      font-size: 11px; padding: 4px 8px; cursor: pointer;
+    }
+
+    /* Collapsible section (shared by hotkeys + appearance) */
+    .settings-section {
+      background: var(--header-bg); border: 1px solid var(--border); border-radius: 10px;
+      padding: 14px 20px; margin-bottom: 28px;
+    }
+    .section-toggle-btn {
+      background: none; border: none; cursor: pointer; color: var(--muted);
+      font-size: 12px; font-weight: 600; text-transform: uppercase;
+      letter-spacing: 0.08em; display: flex; align-items: center; gap: 6px;
+      padding: 0; width: 100%;
+    }
+    .section-toggle-btn:hover { color: #8892a8; }
+    .section-toggle-btn .arrow { transition: transform 0.15s; font-size: 10px; }
+    .section-toggle-btn .arrow.open { transform: rotate(90deg); }
+    .section-body { margin-top: 12px; }
+    .section-body.collapsed { display: none; }
+
+    /* Keep old class names working */
+    .hotkeys-section { background: var(--header-bg); border: 1px solid var(--border); border-radius: 10px; padding: 14px 20px; margin-bottom: 28px; }
+    .hotkeys-toggle-btn { background: none; border: none; cursor: pointer; color: var(--muted); font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; display: flex; align-items: center; gap: 6px; padding: 0; width: 100%; }
+    .hotkeys-toggle-btn:hover { color: #8892a8; }
+    .hotkeys-toggle-btn .arrow { transition: transform 0.15s; font-size: 10px; }
+    .hotkeys-toggle-btn .arrow.open { transform: rotate(90deg); }
+    .hotkeys-body { margin-top: 12px; }
+    .hotkeys-body.collapsed { display: none; }
+
+    .modifier-click-row {
+      display: flex; align-items: center; gap: 12px;
+      padding: 8px 0; border-bottom: 1px solid var(--border); margin-bottom: 12px;
+      font-size: 13px; color: #8892a8; flex-wrap: wrap;
+    }
+    .modifier-click-row label { white-space: nowrap; }
+    .modifier-click-row select, .modifier-click-row input[type="text"] {
+      background: var(--input-bg); border: 1px solid var(--border); border-radius: 4px;
+      color: var(--fg); font-size: 12px; padding: 4px 8px; outline: none;
+    }
+    .modifier-click-row select:focus, .modifier-click-row input[type="text"]:focus {
+      border-color: var(--accent);
+    }
+
+    .hotkey-list { display: flex; flex-direction: column; gap: 6px; }
+    .hotkey-row {
+      display: flex; align-items: center; gap: 10px;
+      background: var(--input-bg); border: 1px solid var(--border); border-radius: 6px;
+      padding: 8px 12px; font-size: 13px;
+    }
+    .hotkey-row.disabled { opacity: 0.5; }
+    .hotkey-combo {
+      background: var(--deep-bg); border: 1px solid #3d4a6e; border-radius: 4px;
+      padding: 3px 10px; font-family: 'CaskaydiaCove Nerd Font', 'Cascadia Code', monospace;
+      font-size: 12px; color: var(--accent-hover); min-width: 110px; text-align: center;
+      cursor: pointer; white-space: nowrap;
+    }
+    .hotkey-combo:hover { border-color: var(--accent); }
+    .hotkey-combo.recording {
+      border-color: var(--star-color); color: var(--star-color);
+      animation: hk-pulse 1s ease-in-out infinite alternate;
+    }
+    @keyframes hk-pulse {
+      from { border-color: var(--star-color); }
+      to { border-color: #c97a00; }
+    }
+    .hotkey-label-input {
+      flex: 1; min-width: 80px; background: transparent; border: none;
+      border-bottom: 1px solid var(--border); color: var(--fg); font-size: 13px;
+      outline: none; padding: 2px 4px;
+    }
+    .hotkey-label-input:focus { border-bottom-color: var(--accent); }
+    .hotkey-action-input {
+      flex: 2; min-width: 100px; background: var(--deep-bg); border: 1px solid var(--border);
+      border-radius: 4px; color: var(--fg); font-size: 12px; padding: 4px 8px;
+      outline: none; font-family: 'CaskaydiaCove Nerd Font', 'Cascadia Code', monospace;
+    }
+    .hotkey-action-input:focus { border-color: var(--accent); }
+    .hotkey-toggle, .hotkey-delete {
+      background: none; border: none; cursor: pointer;
+      font-size: 14px; padding: 2px 6px; transition: color 0.15s;
+    }
+    .hotkey-toggle { color: var(--success); }
+    .hotkey-toggle.off { color: var(--muted); }
+    .hotkey-toggle:hover { color: #98c379; }
+    .hotkey-delete { color: var(--muted); }
+    .hotkey-delete:hover { color: var(--danger); }
+    .hotkey-add-btn {
+      display: inline-flex; align-items: center; gap: 6px;
+      margin-top: 8px; padding: 6px 14px;
+      background: var(--input-bg); border: 1px solid var(--border); border-radius: 6px;
+      color: var(--accent); font-size: 13px; cursor: pointer;
+      transition: border-color 0.15s;
+    }
+    .hotkey-add-btn:hover { border-color: var(--accent); }
+
+    /* Appearance settings */
+    .appearance-body { display: flex; flex-direction: column; gap: 16px; }
+
+    .appearance-sub-label {
+      font-size: 11px; font-weight: 600; text-transform: uppercase;
+      letter-spacing: 0.06em; color: var(--muted); margin-bottom: 8px;
+    }
+
+    .theme-grid {
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px;
+    }
+    .theme-swatch {
+      background: var(--input-bg); border: 2px solid var(--border); border-radius: 8px;
+      padding: 10px; cursor: pointer; transition: border-color 0.15s, box-shadow 0.15s;
+      text-align: center;
+    }
+    .theme-swatch:hover { border-color: var(--muted); }
+    .theme-swatch.active { border-color: var(--accent); box-shadow: 0 0 8px rgba(157,126,224,0.3); }
+    .theme-swatch .swatch-name { font-size: 11px; color: var(--fg); margin-top: 6px; }
+    .theme-swatch .swatch-strip {
+      display: flex; height: 18px; border-radius: 3px; overflow: hidden;
+    }
+    .theme-swatch .swatch-strip span { flex: 1; }
+
+    .settings-row {
+      display: flex; flex-wrap: wrap; align-items: center; gap: 12px;
+      font-size: 13px; color: #8892a8;
+    }
+    .settings-row label { white-space: nowrap; min-width: 60px; }
+    .settings-row select, .settings-row input[type="number"], .settings-row input[type="range"] {
+      background: var(--input-bg); border: 1px solid var(--border); border-radius: 4px;
+      color: var(--fg); font-size: 12px; padding: 4px 8px; outline: none;
+    }
+    .settings-row select:focus, .settings-row input:focus { border-color: var(--accent); }
+    .settings-row input[type="number"] { width: 70px; }
+    .settings-row input[type="range"] { width: 100px; border: none; background: transparent; }
+    .settings-row .toggle-label {
+      display: flex; align-items: center; gap: 6px; cursor: pointer;
+    }
+    .settings-row .toggle-switch {
+      position: relative; width: 32px; height: 18px; border-radius: 9px;
+      background: var(--border); transition: background 0.2s; cursor: pointer;
+      flex-shrink: 0;
+    }
+    .settings-row .toggle-switch::after {
+      content: ''; position: absolute; top: 2px; left: 2px;
+      width: 14px; height: 14px; border-radius: 50%; background: var(--fg);
+      transition: transform 0.2s;
+    }
+    .settings-row .toggle-switch.on { background: var(--accent); }
+    .settings-row .toggle-switch.on::after { transform: translateX(14px); }
+
+    .agent-permission-row {
+      gap: 8px;
+    }
+    .agent-permission-row label { min-width: 100px; }
+    .permission-warning {
+      flex-basis: 100%;
+      color: var(--danger);
+      font-size: 12px;
+    }
+    .settings-help {
+      margin-top: 6px;
+      font-size: 12px; color: var(--muted);
+    }
+    .reset-btn {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 6px 14px; background: transparent; border: 1px solid var(--danger);
+      border-radius: 6px; color: var(--danger); font-size: 12px; cursor: pointer;
+      transition: background 0.15s;
+    }
+    .reset-btn:hover { background: rgba(224, 85, 85, 0.1); }
+  </style>
+</head>
+<body>
+  <script src="/remote-auth.js"></script>
+  <script src="/xterm/lib/xterm.js"></script>
+  <script src="/xterm/lib/addon-fit/addon-fit.js"></script>
+  <script src="/xterm/lib/addon-webgl/addon-webgl.js"></script>
+  <script src="/xterm/lib/addon-unicode11/addon-unicode11.js"></script>
+  <script src="/xterm/lib/addon-web-links/addon-web-links.js"></script>
+  <script src="/xterm/lib/addon-search/addon-search.js"></script>
+  <script src="/term-search.js"></script>
+  <script src="/sl-rate-limits.js"></script>
+  <script src="/media-panel.js"></script>
+  <script>
+    // Register service worker (required for PWA installability)
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('/sw.js').catch(() => {});
+    }
+
+    const params = new URLSearchParams(location.search);
+    const cwd = params.get('cwd');
+    const paramRequestId = params.get('requestId');
+    const hashParams = new URLSearchParams(location.hash.slice(1));
+    const paramWindowId = params.get('windowId') || hashParams.get('windowId');
+    const isBackgroundTab = hashParams.get('bg') === '1';
+    const paramSessionId = params.get('sessionId') ? parseInt(params.get('sessionId'), 10) : null;
+    const wsAuthKey = hashParams.get('key') || params.get('key') || null;
+
+    // ── Shared: hotkey combo normalizer (used by both terminal and landing page) ──
+    const RESERVED_COMBOS = new Set([
+      'Ctrl+W', 'Ctrl+T', 'Ctrl+Tab', 'Ctrl+Shift+Tab', 'Ctrl+V', 'Ctrl+F', 'Shift+Enter',
+    ]);
+
+    function normalizeCombo(event) {
+      const parts = [];
+      if (event.altKey) parts.push('Alt');
+      if (event.ctrlKey) parts.push('Ctrl');
+      if (event.shiftKey) parts.push('Shift');
+      const key = event.key;
+      if (['Control', 'Alt', 'Shift', 'Meta'].includes(key)) return null;
+      const keyName = key.length === 1 ? key.toUpperCase() : key;
+      parts.push(keyName);
+      return parts.join('+');
+    }
+
+    if (cwd) {
+      // ── Terminal mode: full-screen terminal ──
+      const projectName = cwd.split(/[/\\]/).filter(Boolean).pop();
+      document.title = projectName;
+
+      document.body.innerHTML = `
+        <div id="terminal"></div>
+        <div id="statusline"></div>
+        <div id="shift-enter-indicator">Shift+Enter</div>
+        <div id="drop-warning"></div>
+        <div id="bell-flash"></div>
+      `;
+
+      const container = document.getElementById('terminal');
+      const launchAgentId = params.get('agent') || (params.get('claude') === '1' ? 'claude' : '');
+      const agentArgs = params.get('agentArgs') || params.get('claudeArgs') || '';
+      const agentBypass = params.get('agentBypass') === '1';
+
+      function fetchSettingsAndPreset() {
+        return Promise.all([
+          fetch('/api/settings').then(r => r.json()),
+          fetch('/api/theme-presets').then(r => r.json()),
+        ]).then(([s, p]) => ({ settings: s, preset: p[s.theme] || p['default-purple'] }));
+      }
+
+      // Fetch settings before creating terminal
+      fetchSettingsAndPreset().then(({ settings, preset }) => {
+
+        const term = new Terminal({
+          cursorBlink: settings.cursor.blink,
+          cursorStyle: settings.cursor.style,
+          fontSize: settings.font.size,
+          fontFamily: settings.font.family,
+          fontWeight: settings.font.weight,
+          fontWeightBold: 'bold',
+          lineHeight: settings.terminal.lineHeight,
+          scrollback: settings.terminal.scrollback,
+          theme: preset.terminal,
+          allowProposedApi: true,
+        });
+
+        // Ligatures: xterm 5.5 has no fontLigatures option and the WebGL
+        // renderer draws one glyph per cell, so the only way to shape "=>"
+        // and friends is the DOM renderer, where the browser shapes text
+        // (@xterm/addon-ligatures needs Node font-file access the terminal
+        // views don't have: contextIsolation + no nodeIntegration, and the
+        // page also runs in plain browsers). Honest trade: ligatures on means
+        // no GPU renderer for that tab.
+        const useLigatures = !!settings.font.ligatures;
+
+        const fitAddon = new FitAddon.FitAddon();
+        term.loadAddon(fitAddon);
+
+        // Unicode 11 for proper wide-char handling (CJK, emoji, box-drawing)
+        const unicode11Addon = new Unicode11Addon.Unicode11Addon();
+        term.loadAddon(unicode11Addon);
+        term.unicode.activeVersion = '11';
+
+        // Clickable links
+        term.loadAddon(new WebLinksAddon.WebLinksAddon((event, uri) => {
+          window.open(uri, '_blank');
+        }));
+
+        term.open(container);
+        container.style.padding = settings.terminal.padding + 'px';
+        document.body.style.background = preset.terminal.background;
+
+        // WebGL renderer — hardware-accelerated, much better for complex TUIs.
+        // Skipped when ligatures are on: only the DOM renderer shapes them.
+        let webglAddon = null;
+        if (useLigatures) {
+          container.classList.add('ligatures');
+        } else {
+          try {
+            webglAddon = new WebglAddon.WebglAddon();
+            term.loadAddon(webglAddon);
+          } catch (e) {
+            console.warn('WebGL addon failed, using DOM renderer:', e);
+          }
+        }
+
+        // WebGL texture atlas can corrupt over time (xterm.js #4757) — glyphs
+        // render with wrong sprite, most visibly on capital letters. Clear the
+        // atlas on a timer and on focus to rebuild before corruption shows.
+        function clearAtlas() {
+          try { webglAddon && webglAddon.clearTextureAtlas(); } catch {}
+        }
+        const atlasClearInterval = setInterval(clearAtlas, 60000);
+        window.addEventListener('beforeunload', () => clearInterval(atlasClearInterval));
+
+        // ── Ctrl+F scrollback search (addon-search + public/term-search.js) ──
+        let searchBar = null;
+        try {
+          const searchAddon = new SearchAddon.SearchAddon({ highlightLimit: TermSearch.HIGHLIGHT_LIMIT });
+          term.loadAddon(searchAddon);
+          const ui = preset.ui || {};
+          searchBar = TermSearch.createSearchBar({
+            term,
+            addon: searchAddon,
+            colors: {
+              bg: ui.headerBg, fg: preset.terminal.foreground, border: ui.borderColor,
+              accent: ui.accent, muted: ui.mutedText, inputBg: ui.inputBg,
+              match: preset.terminal.yellow || ui.starColor,
+            },
+          });
+        } catch (e) {
+          console.warn('Search addon failed to load:', e);
+        }
+        // Catch Ctrl+F even when focus is outside xterm (e.g. after a click on
+        // the status line) so the bar always opens instead of the browser's find.
+        document.addEventListener('keydown', (e) => {
+          if (searchBar && TermSearch.isFindShortcut(e)) {
+            e.preventDefault();
+            searchBar.open();
+          }
+        }, true);
+
+        fitAddon.fit();
+        // Background tabs must never call term.focus() on load — even if
+        // document.hasFocus() is true, calling it causes Chromium to route
+        // OS keyboard input to this view instead of the active tab.
+        if (!isBackgroundTab) term.focus();
+
+        // ── Debug log helper — POSTs to /api/debug-log (server gates on settings.debug). ──
+        function ccDebugLog(tag, msg) {
+          try {
+            fetch('/api/debug-log', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ tag, msg }),
+              keepalive: true,
+            }).catch(() => {});
+          } catch {}
+        }
+
+        // ── Clipboard access ──
+        // Three tiers, because navigator.clipboard only exists on secure origins
+        // (https/localhost) and terminal views are often served from a plain-http
+        // LAN address:
+        //   1. Electron IPC — origin-independent, so it works everywhere in the app.
+        //   2. navigator.clipboard — secure origins only.
+        //   3. Plain browser on an insecure origin — writes fall back to a hidden
+        //      textarea + execCommand('copy'); reads are impossible (Chrome removed
+        //      execCommand('paste')), so callers must let a native paste event through.
+        //
+        // canReadClipboard() is the single predicate for tier 1-or-2. Every code path
+        // that might paste has to branch on THIS, not on navigator.clipboard directly:
+        // if the programmatic reader and the native-paste listener disagree about
+        // which tier is active, both fire and the text lands twice.
+        function canReadClipboard() {
+          return !!(window.electronClipboard || navigator.clipboard);
+        }
+
+        function readClipboard() {
+          if (window.electronClipboard) return window.electronClipboard.read();
+          if (navigator.clipboard) return navigator.clipboard.readText();
+          return Promise.reject(new Error('no clipboard read API on this origin'));
+        }
+
+        function writeClipboard(text) {
+          if (window.electronClipboard) {
+            return window.electronClipboard.write(text).then(() => {
+              ccDebugLog('clipwrite', JSON.stringify({ ok: true, via: 'ipc', len: text.length, head: text.slice(0, 120) }));
+            }, (err) => {
+              ccDebugLog('clipwrite', JSON.stringify({ ok: false, via: 'ipc', len: text.length, err: String(err && err.message || err) }));
+              throw err;
+            });
+          }
+          if (navigator.clipboard) {
+            return navigator.clipboard.writeText(text).then(
+              () => { ccDebugLog('clipwrite', JSON.stringify({ ok: true, len: text.length, head: text.slice(0, 120) })); },
+              (err) => { ccDebugLog('clipwrite', JSON.stringify({ ok: false, len: text.length, err: err.name + ': ' + err.message })); throw err; }
+            );
+          }
+          const ta = document.createElement('textarea');
+          ta.value = text;
+          ta.style.position = 'fixed';
+          ta.style.opacity = '0';
+          document.body.appendChild(ta);
+          ta.focus();
+          ta.select();
+          let ok = false;
+          try { ok = document.execCommand('copy'); } catch {}
+          ta.remove();
+          term.focus();
+          ccDebugLog('clipwrite', JSON.stringify({ ok, fallback: 'execCommand', len: text.length }));
+          return ok ? Promise.resolve() : Promise.reject(new Error('execCommand copy failed'));
+        }
+
+        // Catch-all clipboard logger — fires on any copy (Ctrl+C, menu, programmatic).
+        // Read after the event so the OS clipboard has the final text.
+        document.addEventListener('copy', () => {
+          if (!canReadClipboard()) return;
+          setTimeout(() => {
+            readClipboard().then((text) => {
+              ccDebugLog('clipboard', JSON.stringify({
+                len: text.length,
+                head: text.slice(0, 300),
+                tail: text.length > 300 ? text.slice(-200) : '',
+                hasNewlines: /\n/.test(text),
+                newlineCount: (text.match(/\n/g) || []).length,
+              }));
+            }).catch((err) => ccDebugLog('clipboard', 'read-failed: ' + err.message));
+          }, 50);
+        });
+
+        // ── Unwrap soft-wrapped lines from terminal selection ──
+        // `raw` defaults to the live selection; pass one explicitly to unwrap a
+        // selection that has since been dropped (see lastRawSelection).
+        function getUnwrappedSelection(term, raw) {
+          const sel = raw === undefined ? term.getSelection() : raw;
+          if (!sel) return '';
+          // Strip embedded CRs — they render as line breaks when pasted.
+          const stripped = sel.replace(/\r/g, '');
+          const lines = stripped.split('\n');
+          if (lines.length <= 1) {
+            ccDebugLog('copy', JSON.stringify({ rawLen: sel.length, outLen: stripped.length, lineCount: 1 }));
+            return stripped;
+          }
+          // xterm already merges rows tagged isWrapped, but ConPTY doesn't
+          // mark every soft-wrap that way. Fall back to width: a line that
+          // ran to the column boundary almost certainly visually wrapped.
+          // Skip lines containing box-drawing/block characters — table rows
+          // fill the width by design and must not be merged.
+          const cols = term.cols;
+          const boxDrawing = /[─-▟]/;
+          let result = lines[0];
+          const mergeInfo = [];
+          for (let i = 1; i < lines.length; i++) {
+            const prev = lines[i - 1];
+            const curr = lines[i];
+            const softWrapped = prev.length >= cols
+              && !boxDrawing.test(prev)
+              && !boxDrawing.test(curr);
+            mergeInfo.push({ prevLen: prev.length, merged: softWrapped });
+            if (softWrapped) {
+              // Strip 2+ trailing whitespace (row pad-fill) before joining,
+              // but keep a single trailing space (legitimate wrap at word boundary).
+              result = result.replace(/[  ]{2,}$/, '') + lines[i];
+            } else {
+              result += '\n' + lines[i];
+            }
+          }
+          ccDebugLog('copy', JSON.stringify({
+            rawLen: sel.length,
+            outLen: result.length,
+            lineCount: lines.length,
+            cols,
+            mergeInfo,
+            resultHead: result.slice(0, 200),
+            resultTail: result.length > 200 ? result.slice(-200) : '',
+          }));
+          return result;
+        }
+
+        // ── Paste helper ──
+        // If the remote app enabled bracketed paste (ESC[?2004h), xterm.js's
+        // term.paste() wraps correctly. If not, multi-line text gets sent raw —
+        // every \r fires Enter, submitting each line separately. For multi-line
+        // pastes we force-wrap ourselves; Claude Code accepts bracketed paste
+        // input whether or not it enabled the mode.
+        function pasteText(text, source) {
+          if (!text) return;
+          const active = term.modes && term.modes.bracketedPasteMode;
+          // Tagged with its entry point so a duplicated paste shows which two
+          // paths both fired for one keystroke.
+          ccDebugLog('paste', JSON.stringify({
+            source: source || 'unknown',
+            len: text.length,
+            bracketed: !!active,
+            head: text.slice(0, 80),
+          }));
+          if (!active && /[\r\n]/.test(text)) {
+            const normalized = text.replace(/\r\n/g, '\r').replace(/\n/g, '\r');
+            sendData('\x1b[200~' + normalized + '\x1b[201~');
+          } else {
+            term.paste(text);
+          }
+        }
+
+        // No programmatic reader on this origin, so the Ctrl+V handler below lets
+        // the native paste event fire and we consume it here. Capture phase +
+        // stopPropagation keeps xterm's own paste handler from double-pasting;
+        // pasteText applies the bracketed-paste wrapping.
+        // The guard MUST be canReadClipboard() — the same predicate Ctrl+V uses.
+        // If the two disagree, one keystroke gets pasted by both paths.
+        document.addEventListener('paste', (e) => {
+          if (canReadClipboard()) return;
+          const text = e.clipboardData && e.clipboardData.getData('text/plain');
+          if (!text) return;
+          e.preventDefault();
+          e.stopPropagation();
+          pasteText(text, 'native-event');
+        }, true);
+
+        // ── Copy on select (controlled by settings) ──
+        // Remember the last non-empty selection. A repaint from the running agent
+        // can drop the live selection before contextmenu fires, which made smart
+        // right-click see an empty selection and take the paste branch instead of
+        // copying. Stored raw and unwrapped only on use — unwrapping logs, and this
+        // fires on every mousemove during a drag.
+        let lastRawSelection = '';
+        term.onSelectionChange(() => {
+          const raw = term.getSelection();
+          if (raw) lastRawSelection = raw;
+        });
+
+        let selectionDisposable = null;
+        function setupCopyOnSelect(enabled) {
+          if (selectionDisposable) { selectionDisposable.dispose(); selectionDisposable = null; }
+          if (enabled) {
+            selectionDisposable = term.onSelectionChange(() => {
+              const sel = getUnwrappedSelection(term);
+              if (sel) writeClipboard(sel).catch(() => {});
+            });
+          }
+        }
+        setupCopyOnSelect(settings.behavior.copyOnSelect);
+        ccDebugLog('clipenv', JSON.stringify({
+          secureContext: window.isSecureContext,
+          hasClipboard: !!navigator.clipboard,
+          hasIpcClipboard: !!window.electronClipboard,
+          canRead: canReadClipboard(),
+          copyOnSelect: !!settings.behavior.copyOnSelect,
+          rightClick: settings.behavior.rightClick,
+          origin: location.origin,
+        }));
+
+        // ── Right-click behavior (controlled by settings) ──
+        let currentRightClick = settings.behavior.rightClick;
+
+        // When we own the right button, the app must not also see it. An app that
+        // enables mouse reporting (Claude Code sets mouseTrackingMode 'any'; cmd
+        // and PowerShell never do) gets the right-button press forwarded by xterm
+        // as an escape sequence, and one that implements its own right-click paste
+        // reads the OS clipboard itself — so a single right-click pasted twice:
+        // once from us, once from the app. preventDefault() on contextmenu came too
+        // late to stop it, because the report is emitted from mousedown.
+        // stopPropagation in the capture phase keeps the event from ever reaching
+        // xterm's handler. Deliberately NOT preventDefault() — that can suppress
+        // the contextmenu event itself in Chromium, which is the event we paste on.
+        container.addEventListener('mousedown', (e) => {
+          if (e.button === 2 && currentRightClick !== 'contextmenu') e.stopPropagation();
+        }, true);
+        container.addEventListener('mouseup', (e) => {
+          if (e.button === 2 && currentRightClick !== 'contextmenu') e.stopPropagation();
+        }, true);
+
+        function rightClickPaste() {
+          readClipboard().then((t) => {
+            ccDebugLog('clipread', JSON.stringify({ via: 'rclick', len: t.length, head: t.slice(0, 120) }));
+            pasteText(t, 'rclick');
+          }).catch((err) => ccDebugLog('clipread', JSON.stringify({ via: 'rclick', err: String(err && err.message || err) })));
+        }
+
+        container.addEventListener('contextmenu', (e) => {
+          if (currentRightClick === 'contextmenu') return; // allow default
+          // Nothing to offer on an origin we can't read the clipboard from and
+          // with no selection to copy — show the native menu (it has a working
+          // Paste) rather than swallowing the click and doing nothing.
+          if (!canReadClipboard() && !term.hasSelection() && !lastRawSelection) return;
+          e.preventDefault();
+          if (currentRightClick === 'smart') {
+            const live = getUnwrappedSelection(term);
+            const sel = live || getUnwrappedSelection(term, lastRawSelection);
+            ccDebugLog('rclick', JSON.stringify({
+              mode: 'smart',
+              branch: sel ? 'copy' : 'paste',
+              selLen: sel.length,
+              stale: !live && !!sel,
+            }));
+            if (sel) {
+              writeClipboard(sel)
+                .then(() => { term.clearSelection(); lastRawSelection = ''; })
+                .catch(() => {});
+            } else {
+              rightClickPaste();
+            }
+          } else if (currentRightClick === 'paste') {
+            rightClickPaste();
+          }
+        });
+
+        // ── Drag-and-drop files from Explorer → insert path(s) into the prompt ──
+        // Mirrors PowerShell: dropping a file types its absolute path. Paths with
+        // spaces are quoted; multiple files are space-separated. Oversized images
+        // would be attached by Claude Code and rejected by the Anthropic API (which
+        // then poisons the conversation), so we warn instead of inserting; dropping
+        // the same set again within the window inserts it anyway.
+        const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+        const MAX_IMAGE_EDGE = 8000;
+        const CONFIRM_WINDOW_MS = 15000;
+        const WARNING_VISIBLE_MS = 5000;
+        const IMAGE_EXT = /\.(png|jpe?g|gif|webp)$/i;
+
+        let pendingDrop = null; // { signature, expires } — set when a drop is held for confirmation
+        let dropWarningTimer = null;
+
+        function showDropWarning(text) {
+          const el = document.getElementById('drop-warning');
+          if (!el) return;
+          el.textContent = text;
+          el.classList.add('visible');
+          if (dropWarningTimer) clearTimeout(dropWarningTimer);
+          dropWarningTimer = setTimeout(() => el.classList.remove('visible'), WARNING_VISIBLE_MS);
+        }
+
+        function isImageFile(file) {
+          return (file.type && file.type.startsWith('image/')) || IMAGE_EXT.test(file.name || '');
+        }
+
+        // Resolves to { width, height }, or null if the image can't be decoded.
+        function imageDimensions(file) {
+          return new Promise((resolve) => {
+            const url = URL.createObjectURL(file);
+            const img = new Image();
+            img.onload = () => { URL.revokeObjectURL(url); resolve({ width: img.naturalWidth, height: img.naturalHeight }); };
+            img.onerror = () => { URL.revokeObjectURL(url); resolve(null); };
+            img.src = url;
+          });
+        }
+
+        // Returns a human-readable size description if the image is oversized, else ''.
+        async function oversizeReason(file) {
+          if (!isImageFile(file)) return '';
+          const mb = (file.size / (1024 * 1024)).toFixed(1);
+          const dim = await imageDimensions(file);
+          if (file.size > MAX_IMAGE_BYTES) return dim ? mb + ' MB, ' + dim.width + '×' + dim.height : mb + ' MB';
+          if (dim && (dim.width > MAX_IMAGE_EDGE || dim.height > MAX_IMAGE_EDGE)) return mb + ' MB, ' + dim.width + '×' + dim.height;
+          return '';
+        }
+
+        window.addEventListener('dragover', (e) => { e.preventDefault(); });
+        window.addEventListener('drop', async (e) => {
+          e.preventDefault();
+          const fileList = e.dataTransfer && e.dataTransfer.files;
+          if (!fileList || !fileList.length) return;
+          if (!window.electronTerm || !window.electronTerm.getPathForFile) return;
+
+          // Capture synchronously — the drop event's dataTransfer is cleared after
+          // dispatch, so grab File refs and resolve paths before any await.
+          const files = Array.from(fileList);
+          const paths = [];
+          for (const file of files) {
+            const p = window.electronTerm.getPathForFile(file);
+            if (p) paths.push(/\s/.test(p) ? '"' + p + '"' : p);
+          }
+          if (!paths.length) return;
+          const signature = paths.join('\n');
+
+          // "Drop again to insert anyway" — same file set, still within the window.
+          if (pendingDrop && pendingDrop.signature === signature && Date.now() < pendingDrop.expires) {
+            pendingDrop = null;
+            pasteText(paths.join(' ') + ' ', 'drop');
+            term.focus();
+            return;
+          }
+          pendingDrop = null;
+
+          let reason = '';
+          for (const file of files) {
+            reason = await oversizeReason(file);
+            if (reason) break;
+          }
+          if (reason) {
+            pendingDrop = { signature, expires: Date.now() + CONFIRM_WINDOW_MS };
+            showDropWarning('Image too large (' + reason + ') — Anthropic may reject it. Drop again to insert anyway.');
+            return;
+          }
+
+          pasteText(paths.join(' ') + ' ', 'drop');
+          term.focus();
+        });
+
+        // ── Bell behavior (controlled by settings) ──
+        let currentBell = settings.behavior.bell;
+        term.onBell(() => {
+          if (currentBell === 'visual') {
+            const flash = document.getElementById('bell-flash');
+            flash.classList.add('visible');
+            setTimeout(() => flash.classList.remove('visible'), 150);
+          } else if (currentBell === 'sound') {
+            try { new Audio('data:audio/wav;base64,UklGRl4AAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGFUYToAAACAgICAgICAgICAgH9/f39/f39/f39/gICAgICAgICAgICBgYGBgYGBgYGBgQ==').play(); } catch {}
+          }
+        });
+
+        // ── Hotkey bindings (fetched from config) ──
+        const hotkeyBindings = new Map();
+        function loadHotkeys() {
+          fetch('/api/hotkeys').then(r => r.json()).then(config => {
+            hotkeyBindings.clear();
+            if (config.bindings) {
+              for (const b of config.bindings) {
+                if (b.enabled !== false && b.combo && b.action) {
+                  hotkeyBindings.set(b.combo, b.action.replace(/\n$/, ''));
+                }
+              }
+            }
+          }).catch(() => {});
+        }
+        loadHotkeys();
+
+        // ── Shift+Enter: send CSI u sequence ──
+        // ── Ctrl+V: paste from clipboard ──
+        // ── Custom hotkey bindings ──
+        term.attachCustomKeyEventHandler((event) => {
+          if (event.type !== 'keydown') return true;
+
+          // Ctrl+F opens the search bar (document capture listener above)
+          // and must never reach the PTY as \x06.
+          if (searchBar && TermSearch.isFindShortcut(event)) return false;
+
+          if (event.key === 'Enter' && event.shiftKey) {
+            event.preventDefault();
+            sendData('\x1b[13;2u');
+            const el = document.getElementById('shift-enter-indicator');
+            el.classList.add('visible');
+            clearTimeout(el._t);
+            el._t = setTimeout(() => el.classList.remove('visible'), 600);
+            return false;
+          }
+          if (event.key === 'v' && event.ctrlKey && !event.shiftKey && !event.altKey) {
+            // No programmatic reader on this origin — let the browser fire its
+            // native paste event, handled by the capture listener above.
+            if (!canReadClipboard()) return true;
+            event.preventDefault();
+            readClipboard().then((t) => {
+              ccDebugLog('clipread', JSON.stringify({ via: 'ctrl-v', len: t.length, head: t.slice(0, 120) }));
+              pasteText(t, 'ctrl-v');
+            }).catch((err) => ccDebugLog('clipread', JSON.stringify({ via: 'ctrl-v', err: String(err && err.message || err) })));
+            return false;
+          }
+
+          // Custom hotkey bindings
+          const combo = normalizeCombo(event);
+          if (combo && hotkeyBindings.has(combo)) {
+            event.preventDefault();
+            sendData(hotkeyBindings.get(combo));
+            return false;
+          }
+
+          return true;
+        });
+
+        // ── WebSocket ──
+        let ws = null;
+        let sessionId = paramSessionId; // pre-seed from URL for post-restart reconnection
+        let reconnectAttempt = 0;
+        const MAX_RECONNECT_ATTEMPTS = 20; // ~4.5 min with backoff, within 5-min orphan window
+
+        function sendData(data) {
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'data', data }));
+          }
+        }
+
+        term.onData(sendData);
+
+        // ── Status line — the claude-code-statusline DNA, provider-agnostic ──
+        // Server pushes per-session stats over the WS ({type:'statusline'}).
+        // Context bar is a window-scaled gradient anchored at 120k/180k/300k/500k
+        // (green→yellow→orange→red), same stops as the original statusline.py.
+        const slEl = document.getElementById('statusline');
+        const SL_RAMP = ['#00ff00','#5fff00','#87ff00','#afff00','#d7ff00','#ffff00',
+                         '#ffd700','#ffaf00','#ff8700','#ff5f00','#ff0000','#d70000'];
+        const SL_ANCHORS = [[0, 0], [120000, 5/11], [180000, 8/11], [300000, 10/11], [500000, 1]];
+        const SL_BAR_W = 130; // px — must match .sl-bar width
+        let slEnabled = !settings.statusline || settings.statusline.enabled !== false;
+        let slStats = null;
+
+        function slGradFrac(tokens) {
+          if (tokens <= 0) return 0;
+          if (tokens >= SL_ANCHORS[SL_ANCHORS.length - 1][0]) return 1;
+          for (let i = 1; i < SL_ANCHORS.length; i++) {
+            const [t0, f0] = SL_ANCHORS[i - 1], [t1, f1] = SL_ANCHORS[i];
+            if (tokens <= t1) return f0 + ((tokens - t0) / (t1 - t0)) * (f1 - f0);
+          }
+          return 1;
+        }
+        function slRampColor(frac) {
+          const f = Math.min(1, Math.max(0, frac || 0));
+          return SL_RAMP[Math.round(f * (SL_RAMP.length - 1))];
+        }
+        function slGradColor(tokens) {
+          return slRampColor(slGradFrac(tokens));
+        }
+        function slFracToTokens(f) {
+          for (let i = 1; i < SL_ANCHORS.length; i++) {
+            const [t0, f0] = SL_ANCHORS[i - 1], [t1, f1] = SL_ANCHORS[i];
+            if (f <= f1) return t0 + ((f - f0) / ((f1 - f0) || 1)) * (t1 - t0);
+          }
+          return SL_ANCHORS[SL_ANCHORS.length - 1][0];
+        }
+        function slGradientCss(windowTokens) {
+          const n = SL_RAMP.length - 1;
+          const stops = SL_RAMP.map((c, i) => {
+            const pos = Math.min(slFracToTokens(i / n) / windowTokens, 1) * 100;
+            return `${c} ${pos.toFixed(1)}%`;
+          });
+          return `linear-gradient(90deg, ${stops.join(', ')})`;
+        }
+        function slFormatTokens(n) {
+          n = Math.max(0, n || 0);
+          if (n >= 1e6) {
+            const m = n / 1e6;
+            return Math.abs(m - Math.round(m)) < 0.05 ? `${Math.round(m)}M` : `${m.toFixed(1)}M`;
+          }
+          const k = n / 1000;
+          return k >= 100 ? `${Math.round(k)}k` : `${k.toFixed(1)}k`;
+        }
+        function slFmtDuration(ms) {
+          const total = Math.max(0, Math.floor(ms / 1000));
+          const h = Math.floor(total / 3600), m = Math.floor((total % 3600) / 60), s = total % 60;
+          if (h) return `${h}h ${m}m`;
+          if (m) return `${m}m ${s}s`;
+          return `${s}s`;
+        }
+        function slPrettyModel(id) {
+          if (!id) return null;
+          const m = String(id);
+          if (!/^claude-/.test(m)) return m;
+          return m.replace(/^claude-/, '').replace(/-\d{8}$/, '')
+            .split('-').map(w => /^\d/.test(w) ? w : w[0].toUpperCase() + w.slice(1)).join(' ');
+        }
+        const slEsc = (s) => String(s).replace(/[&<>"']/g,
+          c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+        function slApplyTheme(p) {
+          const st = document.documentElement.style;
+          st.setProperty('--sl-bg', (p.ui && p.ui.deepBg) || '#0f0f1e');
+          st.setProperty('--sl-border', (p.ui && p.ui.borderColor) || '#2a3a5c');
+          st.setProperty('--sl-muted', (p.ui && p.ui.mutedText) || '#5c6370');
+          st.setProperty('--sl-fg', p.terminal.foreground || '#c8c8c8');
+        }
+        slApplyTheme(preset);
+
+        // ── Media panel — images the agent read or captured (public/media-panel.js) ──
+        // Fed by {type:'media'} pushes; shrinks #terminal on the right the same
+        // way the statusline takes the bottom. The badge count reaches the tab
+        // bar through term-preload's electronMedia bridge (absent in a browser).
+        const SL_HEIGHT_PX = 26;
+        const mediaPanel = window.MediaPanel ? window.MediaPanel.create({
+          container,
+          focusTerminal: () => term.focus(),
+          badge: (n) => { if (window.electronMedia && window.electronMedia.badge) window.electronMedia.badge(n); },
+        }) : null;
+
+        function slRender() {
+          const show = slEnabled && slStats;
+          slEl.classList.toggle('visible', !!show);
+          // Terminal yields the bar's height; ResizeObserver refits xterm.
+          container.style.bottom = show ? `${SL_HEIGHT_PX}px` : '0';
+          if (mediaPanel) mediaPanel.setBottom(show ? SL_HEIGHT_PX : 0);
+          if (!show) return;
+          const s = slStats, p = s.provider;
+          const segs = [];
+
+          const name = slPrettyModel(p && p.model) || (s.agent && s.agent.name);
+          if (name) {
+            const color = s.agent ? slEsc(s.agent.color) : 'inherit';
+            const dot = s.agent ? `<span class="sl-dot" style="background:${color}"></span>` : '';
+            segs.push(`<span class="sl-seg">${dot}<span style="color:${color}">${slEsc(name)}</span></span>`);
+          }
+          if (s.dirName) segs.push(`<span class="sl-seg">📁 ${slEsc(s.dirName)}</span>`);
+          if (s.branch) segs.push(`<span class="sl-seg" style="color:var(--success,#50c878)">⎇ ${slEsc(s.branch)}</span>`);
+
+          if (p && p.contextUsed != null && p.contextWindow > 0) {
+            const used = p.contextUsed, win = p.contextWindow;
+            const pct = Math.min(100, (used / win) * 100);
+            const grad = slGradientCss(win);
+            segs.push(
+              `<span class="sl-seg">` +
+              `<span class="sl-bar"><span class="sl-bar-track" style="background:${grad}"></span>` +
+              `<span class="sl-bar-fill" style="width:${pct.toFixed(2)}%;background:${grad};background-size:${SL_BAR_W}px 100%"></span></span>` +
+              `<span style="color:#e5c07b">${slFormatTokens(used)}/${slFormatTokens(win)}</span>` +
+              `<span style="color:${slGradColor(used)}">${((used / win) * 100).toFixed(1)}%</span></span>`
+            );
+          }
+          if (p && (p.tokensIn > 0 || p.tokensOut > 0)) {
+            segs.push(`<span class="sl-seg" style="color:var(--cat-accent,#56b6c2)">↑${slFormatTokens(p.tokensIn)} ↓${slFormatTokens(p.tokensOut)}</span>`);
+          }
+          if (p && typeof p.costUsd === 'number') {
+            segs.push(`<span class="sl-seg" style="color:var(--success,#50c878)">$${p.costUsd.toFixed(2)}</span>`);
+          }
+          // Subscription rate-limit windows (absent for API-key users). Same
+          // green→red ramp as the context bar, keyed on % of the window used.
+          const pills = (p && window.SlRateLimits) ? SlRateLimits.formatRateLimitPills(p.rateLimits) : [];
+          if (pills.length) {
+            segs.push(`<span class="sl-seg">` + pills.map((pill) =>
+              `<span class="sl-pill" style="color:${slRampColor(pill.frac)};border-color:${slRampColor(pill.frac)}" title="${slEsc(pill.title)}">${slEsc(pill.text)}</span>`
+            ).join('') + `</span>`);
+          }
+          const timeMs = (p && p.activeMs) ? p.activeMs : s.elapsedMs;
+          if (timeMs != null) segs.push(`<span class="sl-seg sl-muted">⏱ ${slFmtDuration(timeMs)}</span>`);
+
+          slEl.innerHTML = segs.join('<span class="sl-muted">|</span>');
+        }
+
+        // ── Idle detection ──
+        let idle = false;
+
+        function markIdle() {
+          if (idle) return;
+          idle = true;
+          document.title = `>>> ${projectName} <<<`;
+        }
+
+        function markActive() {
+          if (!idle) return;
+          idle = false;
+          window._attentionReason = null;
+          document.title = projectName;
+        }
+
+        function wireWebSocket(sock, isReconnect) {
+          window.__aiTabsWs = sock;
+          sock.onopen = () => {
+            if (isReconnect && sessionId != null) {
+              // Reattach to the orphaned session
+              const dims = fitAddon.proposeDimensions();
+              sock.send(JSON.stringify({
+                type: 'attach', sessionId,
+                cols: dims ? dims.cols : 120,
+                rows: dims ? dims.rows : 30,
+              }));
+            } else {
+              const dims = fitAddon.proposeDimensions();
+              const createMsg = {
+                type: 'create', cwd,
+                cols: dims ? dims.cols : 120,
+                rows: dims ? dims.rows : 30,
+              };
+              // An open-tab request's command is looked up server-side by
+              // requestId (never read from the URL); it wins over the agent.
+              if (launchAgentId) {
+                createMsg.launchAgent = launchAgentId;
+                if (agentArgs) createMsg.agentArgs = agentArgs;
+                if (agentBypass) createMsg.agentBypass = true;
+              }
+              if (paramRequestId) {
+                createMsg.requestId = paramRequestId;
+              }
+              if (paramWindowId) {
+                createMsg.windowId = paramWindowId;
+              }
+              sock.send(JSON.stringify(createMsg));
+            }
+          };
+
+          sock.onmessage = (event) => {
+            let msg;
+            try { msg = JSON.parse(event.data); } catch { return; }
+
+            switch (msg.type) {
+              case 'created':
+                sessionId = msg.sessionId;
+                window._sessionId = sessionId;
+                reconnectAttempt = 0;
+                if (mediaPanel) mediaPanel.attach(sessionId);
+                break;
+              case 'attached':
+                sessionId = msg.sessionId;
+                window._sessionId = sessionId;
+                reconnectAttempt = 0;
+                if (mediaPanel) mediaPanel.attach(sessionId);
+                term.reset();
+                if (msg.scrollback) {
+                  term.write(msg.scrollback.replace(/\n/g, '\r\n'));
+                }
+                // On the alternate screen the server sends no scrollback and
+                // nudges the app to repaint instead. A banner there would be
+                // overdrawn a moment later, and its newlines would scroll the
+                // repaint down a row — so leave the screen untouched.
+                if (!msg.altScreen) {
+                  term.write('\r\n\x1b[32m[Reconnected]\x1b[0m\r\n');
+                }
+                break;
+              case 'data':
+                term.write(msg.data);
+                markActive();
+                break;
+              case 'idle':
+              case 'cc-notification':
+                // Why the agent wants us (lib/desktop-notify ATTENTION_REASONS);
+                // main.js reads this back when the title flips to idle so the
+                // desktop notification can say what happened.
+                window._attentionReason = msg.reason || null;
+                markIdle();
+                break;
+              case 'statusline':
+                slStats = msg.stats;
+                slRender();
+                break;
+              case 'media':
+                if (mediaPanel && msg.sessionId === sessionId) mediaPanel.push(msg.item);
+                break;
+              case 'media-removed':
+                if (mediaPanel && msg.sessionId === sessionId) mediaPanel.remove(msg.id);
+                break;
+              case 'hotkeys-updated':
+                loadHotkeys();
+                break;
+              case 'settings-updated':
+                // Re-fetch settings and apply live
+                fetchSettingsAndPreset().then(({ settings: s, preset: p }) => {
+                  term.options.theme = p.terminal;
+                  term.options.fontSize = s.font.size;
+                  term.options.fontFamily = s.font.family;
+                  term.options.fontWeight = s.font.weight;
+                  term.options.cursorStyle = s.cursor.style;
+                  term.options.cursorBlink = s.cursor.blink;
+                  term.options.lineHeight = s.terminal.lineHeight;
+                  term.options.scrollback = s.terminal.scrollback;
+                  container.style.padding = s.terminal.padding + 'px';
+                  document.body.style.background = p.terminal.background;
+                  setupCopyOnSelect(s.behavior.copyOnSelect);
+                  currentRightClick = s.behavior.rightClick;
+                  currentBell = s.behavior.bell;
+                  slEnabled = !s.statusline || s.statusline.enabled !== false;
+                  slApplyTheme(p);
+                  slRender();
+                  fitAddon.fit();
+                });
+                break;
+              case 'exit':
+                term.write('\r\n\x1b[90m[Process exited]\x1b[0m\r\n');
+                window._processExited = true;
+                break;
+              case 'error':
+                // Session gone (e.g., orphan timer expired), or it never started
+                term.write(msg.message && msg.message !== 'Session not found'
+                  ? `\r\n\x1b[31m[${msg.message}]\x1b[0m\r\n`
+                  : '\r\n\x1b[90m[Session ended]\x1b[0m\r\n');
+                sessionId = null;
+                break;
+            }
+          };
+
+          sock.onclose = () => {
+            if (window._processExited || sessionId == null) {
+              term.write('\r\n\x1b[90m[Connection lost]\x1b[0m\r\n');
+              return;
+            }
+            if (reconnectAttempt >= MAX_RECONNECT_ATTEMPTS) {
+              term.write('\r\n\x1b[90m[Connection lost — could not reconnect]\x1b[0m\r\n');
+              return;
+            }
+            const delay = Math.min(1000 * Math.pow(1.5, reconnectAttempt), 30000);
+            reconnectAttempt++;
+            term.write(`\r\n\x1b[90m[Connection lost — reconnecting (${reconnectAttempt})...]\x1b[0m\r\n`);
+            setTimeout(() => {
+              try {
+                ws = new WebSocket(wsUrl); // keyed, like the first connect
+                window._ws = ws;
+                wireWebSocket(ws, true);
+              } catch {
+                term.write('\r\n\x1b[90m[Reconnect failed]\x1b[0m\r\n');
+              }
+            }, delay);
+          };
+        }
+
+        const wsUrl = wsAuthKey
+          ? `ws://${location.host}?key=${wsAuthKey}`
+          : `ws://${location.host}`;
+        ws = new WebSocket(wsUrl);
+        window._ws = ws;
+        // If sessionId came from URL (post-restart reconnect), attach instead of create
+        wireWebSocket(ws, paramSessionId != null);
+
+        // Kill session when an Electron tab is intentionally closed. This is a
+        // backstop only — main.js destroyTab() injects the same kill explicitly.
+        // It must NOT run in plain browsers: there, beforeunload also fires on
+        // refresh and navigation, which killed live sessions (2026-08-25). A
+        // browser client that goes away for good is reaped by the server's
+        // orphan timer instead.
+        if (navigator.userAgent.includes('Electron')) {
+          window.addEventListener('beforeunload', () => {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({ type: 'kill' }));
+            }
+          });
+        }
+
+        // Resize handling
+        new ResizeObserver(() => {
+          fitAddon.fit();
+          const dims = fitAddon.proposeDimensions();
+          if (dims && ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'resize', cols: dims.cols, rows: dims.rows }));
+          }
+        }).observe(container);
+
+        // When this tab gains Electron focus (via webContents.focus() in the
+        // main process), the renderer's window fires a 'focus' event.  Use it
+        // to reclaim xterm's textarea so keystrokes reach the PTY.
+        // No IPC/preload needed — this uses the browser's built-in focus event.
+        window.addEventListener('focus', () => {
+          term.focus();
+          clearAtlas();
+        });
+
+        // Called by main process via executeJavaScript on tab switch —
+        // refit terminal to current bounds and send resize to server.
+        window._activateTab = () => {
+          fitAddon.fit();
+          const dims = fitAddon.proposeDimensions();
+          if (dims && ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'resize', cols: dims.cols, rows: dims.rows }));
+          }
+          term.focus();
+        };
+      });
+
+    } else {
+      // ── Landing page ──
+      document.documentElement.classList.add('landing-page');
+      let favorites = new Set();
+      let projects = [];
+      let catAssignments = {};
+      let catOrder = [];
+      let hotkeyConfig = { bindings: [], modifierClick: { modifier: 'RightShift', agentArgs: '--dangerously-skip-permissions' } };
+      let hotkeysExpanded = false;
+      let appearanceExpanded = false;
+      let settings = {};
+      let themePresets = {};
+      let networkInfo = {};
+      let agentList = [];
+
+      function networkUrls() {
+        const port = networkInfo.port || 25283;
+        const urls = [];
+        const remote = (settings.remoteHostname || '').trim();
+        if (remote) {
+          const hasScheme = remote.includes('://');
+          const hasPort = !hasScheme && remote.includes(':');
+          const display = hasScheme || hasPort ? remote : `${remote}:${port}`;
+          const url = hasScheme ? remote : `http://${display}`;
+          urls.push({ label: display, url });
+        }
+        if (networkInfo.localIp) urls.push({ label: `${networkInfo.localIp}:${port}`, url: `http://${networkInfo.localIp}:${port}` });
+        if (networkInfo.tailscaleIp) urls.push({ label: `ts: ${networkInfo.tailscaleIp}:${port}`, url: `http://${networkInfo.tailscaleIp}:${port}` });
+        return urls;
+      }
+
+      function refreshNetworkInfoDisplay() {
+        const netEl = document.getElementById('network-info');
+        if (!netEl) return;
+        const urls = networkUrls();
+        const lines = urls.map(u => u.label);
+        const hasUrls = urls.length > 0;
+        const qrLink = hasUrls
+          ? `<a href="#" id="show-qr-link" style="color:var(--accent-hover);text-decoration:none;font-size:10px">Show QR ▸</a>`
+          : '';
+        netEl.innerHTML = lines.join('<br>') + (qrLink ? `<div style="margin-top:4px">${qrLink}</div>` : '');
+        const link = document.getElementById('show-qr-link');
+        if (link) link.addEventListener('click', (e) => { e.preventDefault(); openQrModal(); });
+      }
+
+      function openQrModal() {
+        const urls = networkUrls();
+        if (!urls.length) return;
+        const overlay = document.getElementById('qr-overlay');
+        const select = document.getElementById('qr-url-select');
+        select.innerHTML = urls.map((u, i) => `<option value="${i}">${u.label}</option>`).join('');
+        const updateQr = () => {
+          const picked = urls[parseInt(select.value, 10)] || urls[0];
+          document.getElementById('qr-image').src = `/api/qr?data=${encodeURIComponent(picked.url)}`;
+          document.getElementById('qr-url-text').textContent = picked.url;
+        };
+        select.onchange = updateQr;
+        updateQr();
+        overlay.style.display = 'flex';
+      }
+
+      function projectAgentFor(cwd) {
+        const p = projects.find(p => p.cwd === cwd);
+        return (p && p.agent) || null;
+      }
+
+      // Folder and category names are user-controlled (a cloned repo can be
+      // named '<img onerror=...>'), so escape them before any innerHTML.
+      function escapeHtml(text) {
+        return String(text).replace(/[&<>"']/g, (c) => (
+          { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+        ));
+      }
+
+      function makeUrl(cwd) {
+        const agent = projectAgentFor(cwd) || settings.defaultAgent || 'claude';
+        return `${location.origin}/?cwd=${encodeURIComponent(cwd)}&agent=${encodeURIComponent(agent)}`;
+      }
+
+      // ── Modifier+click tracking (Right Shift state) ──
+      let rightShiftHeld = false;
+      document.addEventListener('keydown', (e) => {
+        if (e.key === 'Shift' && e.location === 2) rightShiftHeld = true;
+      });
+      document.addEventListener('keyup', (e) => {
+        if (e.key === 'Shift' && e.location === 2) rightShiftHeld = false;
+      });
+      window.addEventListener('blur', () => { rightShiftHeld = false; });
+
+      document.body.innerHTML = `
+        <div class="landing">
+          <div class="landing-header">
+            <div>
+              <h1>ai-tabs</h1>
+              <p>Click to open a project with its agent. Alt+click for a plain terminal. Drag links to your bookmark bar.</p>
+            </div>
+            <div id="network-info" style="text-align:center;font-size:11px;font-family:monospace;color:var(--muted);opacity:0.8;line-height:1.6"></div>
+            <div style="display:flex;align-items:center;gap:12px">
+              <div class="version-label" id="version-label"></div>
+              <button id="restart-btn" title="Restart ai-tabs (running sessions survive)" style="
+                padding:5px 12px;border-radius:6px;border:1px solid var(--border);
+                background:var(--input-bg);color:var(--fg);font-size:12px;cursor:pointer;
+                transition:background 0.15s,border-color 0.15s;white-space:nowrap">
+                ↺ Restart
+              </button>
+              <button id="servers-btn" title="Open the server picker (opens a separate window)" style="
+                padding:5px 12px;border-radius:6px;border:1px solid var(--border);
+                background:var(--input-bg);color:var(--fg);font-size:12px;cursor:pointer;
+              ">Servers…</button>
+            </div>
+          </div>
+          <div class="favorites-bar" id="favorites-bar">
+            <span class="empty">Star a project below to pin it here</span>
+          </div>
+          <div class="hotkeys-section" id="hotkeys-section">
+            <button class="hotkeys-toggle-btn" id="hotkeys-toggle-btn">
+              <span class="arrow" id="hotkeys-arrow">&#x25B6;</span> Hotkeys
+            </button>
+            <div class="hotkeys-body collapsed" id="hotkeys-body">
+              <div class="modifier-click-row">
+                <label>Modifier+Click opens with:</label>
+                <select id="modifier-select">
+                  <option value="RightShift">Right Shift</option>
+                  <option value="CtrlShift">Ctrl+Shift</option>
+                  <option value="AltShift">Alt+Shift</option>
+                </select>
+                <input id="agent-args-input" type="text" placeholder="--dangerously-skip-permissions" style="flex:1;min-width:200px">
+              </div>
+              <div class="hotkey-list" id="hotkey-list"></div>
+              <button class="hotkey-add-btn" id="hotkey-add-btn">+ Add Binding</button>
+            </div>
+          </div>
+          <div class="settings-section" id="appearance-section">
+            <button class="section-toggle-btn" id="appearance-toggle-btn">
+              <span class="arrow" id="appearance-arrow">&#x25B6;</span> Settings
+            </button>
+            <div class="section-body collapsed" id="appearance-body">
+              <div class="appearance-body">
+                <div>
+                  <div class="appearance-sub-label">Theme</div>
+                  <div class="theme-grid" id="theme-grid"></div>
+                </div>
+                <div>
+                  <div class="appearance-sub-label">Default agent</div>
+                  <div class="settings-row">
+                    <label>New tabs open</label>
+                    <select id="set-default-agent"></select>
+                  </div>
+                </div>
+                <div>
+                  <div class="appearance-sub-label">Default session permissions</div>
+                  <div id="agent-permissions-settings"></div>
+                  <div class="settings-help">Changes apply to new tabs only.</div>
+                </div>
+                <div>
+                  <div class="appearance-sub-label">Default launch options</div>
+                  <div id="agent-launch-options-settings"></div>
+                  <div class="settings-help">Per-project overrides live in each project's settings popover. Applies to new tabs only.</div>
+                </div>
+                <div>
+                  <div class="appearance-sub-label">Font</div>
+                  <div class="settings-row">
+                    <label>Family</label>
+                    <select id="set-font-family" style="min-width:200px">
+                      <option value="'CaskaydiaCove Nerd Font', 'Cascadia Code', 'Consolas', monospace">CaskaydiaCove / Cascadia</option>
+                      <option value="'Fira Code', 'Consolas', monospace">Fira Code</option>
+                      <option value="'JetBrains Mono', 'Consolas', monospace">JetBrains Mono</option>
+                      <option value="'Source Code Pro', 'Consolas', monospace">Source Code Pro</option>
+                      <option value="'Hack', 'Consolas', monospace">Hack</option>
+                      <option value="'IBM Plex Mono', 'Consolas', monospace">IBM Plex Mono</option>
+                      <option value="'Consolas', monospace">Consolas</option>
+                      <option value="'Courier New', monospace">Courier New</option>
+                    </select>
+                    <label>Size</label>
+                    <input type="number" id="set-font-size" min="10" max="24" step="1">
+                    <label>Weight</label>
+                    <select id="set-font-weight">
+                      <option value="normal">Normal</option>
+                      <option value="bold">Bold</option>
+                    </select>
+                    <span class="toggle-label" id="toggle-ligatures" title="Shapes ligatures (=>, !=, ->) with the DOM renderer. Tabs opened with this on skip the WebGL renderer, so heavy TUIs redraw slower.">
+                      <span class="toggle-switch" id="switch-ligatures"></span> Ligatures (disables GPU rendering)
+                    </span>
+                  </div>
+                </div>
+                <div>
+                  <div class="appearance-sub-label">Cursor</div>
+                  <div class="settings-row">
+                    <label>Style</label>
+                    <select id="set-cursor-style">
+                      <option value="block">Block</option>
+                      <option value="underline">Underline</option>
+                      <option value="bar">Bar</option>
+                    </select>
+                    <span class="toggle-label" id="toggle-cursor-blink">
+                      <span class="toggle-switch" id="switch-cursor-blink"></span> Blink
+                    </span>
+                  </div>
+                </div>
+                <div>
+                  <div class="appearance-sub-label">Terminal</div>
+                  <div class="settings-row">
+                    <label>Line height</label>
+                    <input type="number" id="set-line-height" min="0.8" max="2.0" step="0.1">
+                    <label>Padding</label>
+                    <input type="number" id="set-padding" min="0" max="20" step="1">
+                    <label>Scrollback</label>
+                    <input type="number" id="set-scrollback" min="1000" max="100000" step="1000">
+                  </div>
+                </div>
+                <div>
+                  <div class="appearance-sub-label">Behavior</div>
+                  <div class="settings-row">
+                    <span class="toggle-label" id="toggle-copy-on-select">
+                      <span class="toggle-switch" id="switch-copy-on-select"></span> Copy on select
+                    </span>
+                    <label style="margin-left:12px">Right-click</label>
+                    <select id="set-right-click">
+                      <option value="smart">Smart (copy/paste)</option>
+                      <option value="paste">Always paste</option>
+                      <option value="contextmenu">Context menu</option>
+                    </select>
+                    <label style="margin-left:12px">Bell</label>
+                    <select id="set-bell">
+                      <option value="off">Off</option>
+                      <option value="visual">Visual flash</option>
+                      <option value="sound">System sound</option>
+                    </select>
+                    <span class="toggle-label" id="toggle-statusline" style="margin-left:12px"
+                          title="Per-tab status bar: model, git branch, context-window usage, and token counts">
+                      <span class="toggle-switch" id="switch-statusline"></span> Status line
+                    </span>
+                    <span class="toggle-label" id="toggle-sl-autohook" style="margin-left:12px"
+                          title="Launch Claude Code with its statusLine hook wired to ai-tabs (adds --settings to the launch command) so the bar shows session cost and the exact context window. Your global ~/.claude/settings.json is never modified.">
+                      <span class="toggle-switch" id="switch-sl-autohook"></span> Cost hook
+                    </span>
+                    <span class="toggle-label" id="toggle-desktop-notify" style="margin-left:12px"
+                          title="Show an OS notification when a background tab's agent finishes or needs input. Click the notification to jump to that tab.">
+                      <span class="toggle-switch" id="switch-desktop-notify"></span> Desktop notifications
+                    </span>
+                  </div>
+                </div>
+                <div>
+                  <div class="appearance-sub-label">Remote access</div>
+                  <div class="settings-row">
+                    <label>Password</label>
+                    <input id="set-remote-password" type="password" autocomplete="new-password" placeholder="Not set" style="min-width:200px">
+                    <button class="reset-btn" id="set-password-btn" style="margin-left:8px">Save</button>
+                    <span id="set-password-status" style="margin-left:12px;font-size:12px;color:var(--muted)"></span>
+                  </div>
+                  <div class="settings-row">
+                    <label title="Shown on the landing page as a bookmarkable URL for reaching this machine from outside the LAN (e.g. tailnet or DDNS hostname). Display-only.">Remote hostname</label>
+                    <input id="set-remote-hostname" type="text" autocomplete="off" placeholder="e.g. ai-tabs.tail1234.ts.net" style="min-width:260px;flex:1">
+                  </div>
+                </div>
+                <div id="remote-connect-section" style="display:none">
+                  <div class="appearance-sub-label" title="Which ai-tabs server this window is connected to. Each window stays on the server it was launched with.">Server</div>
+                  <div class="settings-row">
+                    <span id="remote-connected-label" style="font-size:12px;color:var(--muted)"></span>
+                    <button class="reset-btn" id="remote-switch-btn" style="margin-left:8px">Switch server…</button>
+                  </div>
+                </div>
+                <div>
+                  <button class="reset-btn" id="reset-settings-btn">Reset to defaults</button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div id="project-sections"></div>
+          <div id="qr-overlay" style="display:none;position:fixed;inset:0;z-index:1000;background:rgba(0,0,0,0.75);align-items:center;justify-content:center">
+            <div style="background:var(--header-bg);border:1px solid var(--border);border-radius:12px;padding:20px;max-width:360px;width:90%;text-align:center">
+              <h2 style="font-size:16px;color:var(--accent-hover);margin-bottom:12px">Scan to open ai-tabs</h2>
+              <select id="qr-url-select" style="width:100%;padding:6px 8px;background:var(--input-bg);border:1px solid var(--border);border-radius:6px;color:var(--fg);font-size:13px;margin-bottom:12px"></select>
+              <div style="background:#fff;border-radius:8px;padding:12px;display:flex;justify-content:center">
+                <img id="qr-image" alt="QR code" style="width:240px;height:240px;display:block">
+              </div>
+              <div id="qr-url-text" style="font-family:monospace;font-size:11px;color:var(--muted);margin-top:10px;word-break:break-all"></div>
+              <div style="display:flex;justify-content:flex-end;margin-top:12px">
+                <button id="qr-close-btn" class="reset-btn">Close</button>
+              </div>
+            </div>
+          </div>
+          <div id="password-setup-overlay" style="display:none;position:fixed;inset:0;z-index:1000;background:rgba(0,0,0,0.75);align-items:center;justify-content:center">
+            <div style="background:var(--header-bg);border:1px solid var(--border);border-radius:12px;padding:24px;max-width:420px;width:90%">
+              <h2 style="font-size:18px;color:var(--accent-hover);margin-bottom:8px">Set a remote-access password</h2>
+              <p style="font-size:13px;color:var(--muted);margin-bottom:16px;line-height:1.5">
+                Phone and tablet browsers will use this to connect to this machine. Leave blank to skip — remote access will stay disabled.
+              </p>
+              <input id="setup-password-input" type="password" autocomplete="new-password" placeholder="New password (12+ chars)"
+                style="width:100%;padding:10px 12px;background:var(--input-bg);border:1px solid var(--border);border-radius:6px;color:var(--fg);font-size:14px;margin-bottom:12px">
+              <div id="setup-password-error" style="color:var(--danger);font-size:12px;margin-bottom:12px;display:none"></div>
+              <div style="display:flex;gap:8px;justify-content:flex-end">
+                <button id="setup-password-skip" class="reset-btn">Skip</button>
+                <button id="setup-password-save" class="reset-btn" style="background:var(--accent);color:white;border-color:var(--accent)">Save</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      `;
+
+      // ── Apply theme to landing page ──
+      function applyThemeToPage(preset) {
+        const r = document.documentElement.style;
+        r.setProperty('--bg', preset.terminal.background);
+        r.setProperty('--fg', preset.terminal.foreground);
+        r.setProperty('--accent', preset.ui.accent);
+        r.setProperty('--accent-hover', preset.ui.accentHover);
+        r.setProperty('--header-bg', preset.ui.headerBg);
+        r.setProperty('--card-hover-bg', preset.ui.cardHoverBg);
+        r.setProperty('--border', preset.ui.borderColor);
+        r.setProperty('--muted', preset.ui.mutedText);
+        r.setProperty('--input-bg', preset.ui.inputBg);
+        r.setProperty('--deep-bg', preset.ui.deepBg);
+        r.setProperty('--star-color', preset.ui.starColor);
+        r.setProperty('--success', preset.ui.success);
+        r.setProperty('--danger', preset.ui.danger);
+        r.setProperty('--cat-accent', preset.ui.catAccent);
+      }
+
+      function renderThemeGrid() {
+        const grid = document.getElementById('theme-grid');
+        if (!grid) return;
+        grid.innerHTML = Object.entries(themePresets).map(([key, p]) => {
+          const active = settings.theme === key ? ' active' : '';
+          const colors = [
+            p.terminal.red, p.terminal.green, p.terminal.yellow, p.terminal.blue,
+            p.terminal.magenta, p.terminal.cyan, p.terminal.brightRed, p.terminal.brightGreen,
+          ];
+          const strip = colors.map(c => `<span style="background:${c}"></span>`).join('');
+          return `<div class="theme-swatch${active}" data-theme="${key}" style="background:${p.terminal.background}">
+            <div class="swatch-strip">${strip}</div>
+            <div class="swatch-name" style="color:${p.terminal.foreground}">${p.name}</div>
+          </div>`;
+        }).join('');
+      }
+
+      function renderAgentPermissionControls() {
+        const container = document.getElementById('agent-permissions-settings');
+        if (!container) return;
+
+        const configurable = agentList.filter(
+          (agent) => ['claude', 'codex', 'gemini'].includes(agent.id)
+            && Array.isArray(agent.permissionProfiles) && agent.permissionProfiles.length > 0
+        );
+
+        container.innerHTML = configurable.map((agent) => {
+          const selectId = `agent-permission-${agent.id}`;
+          const selected = selectedPermissionProfileId(agent);
+          const options = agent.permissionProfiles.map((profile) =>
+            `<option value="${profile.id}"${profile.id === selected ? ' selected' : ''}>${profile.label}</option>`
+          ).join('');
+          return `
+            <div class="settings-row agent-permission-row">
+              <label for="${selectId}">${agent.name}</label>
+              <select id="${selectId}" data-agent-permission="${agent.id}">${options}</select>
+              <span class="permission-warning" data-permission-warning="${agent.id}" role="status" aria-live="polite" hidden></span>
+            </div>
+          `;
+        }).join('');
+
+        for (const agent of configurable) updatePermissionWarning(agent.id);
+      }
+
+      // Launch options (lib/agents.js launchOptions): Settings holds the default
+      // per agent+option; projects.json may override per project.
+      function defaultLaunchOption(agentId, optionId) {
+        return settings.agentLaunchOptions?.[agentId]?.[optionId] === true;
+      }
+
+      function renderAgentLaunchOptionControls() {
+        const container = document.getElementById('agent-launch-options-settings');
+        if (!container) return;
+        const withOptions = agentList.filter(
+          (agent) => Array.isArray(agent.launchOptions) && agent.launchOptions.length > 0
+        );
+        if (withOptions.length === 0) {
+          container.innerHTML = '<div class="settings-help">No agent exposes launch options.</div>';
+          return;
+        }
+        container.innerHTML = withOptions.map((agent) => agent.launchOptions.map((opt) => {
+          const on = defaultLaunchOption(agent.id, opt.id) ? ' on' : '';
+          return `
+            <div class="settings-row agent-permission-row">
+              <label>${agent.name}</label>
+              <span class="toggle-label" data-launch-option-agent="${agent.id}" data-launch-option="${opt.id}" title="${(opt.description || '').replace(/"/g, '&quot;')}">
+                <span class="toggle-switch${on}"></span> ${opt.label}
+              </span>
+            </div>
+          `;
+        }).join('')).join('');
+      }
+
+      function selectedPermissionProfileId(agent) {
+        const saved = settings.agentPermissions?.[agent.id];
+        return agent.permissionProfiles.some((profile) => profile.id === saved)
+          ? saved
+          : agent.defaultPermissionProfile;
+      }
+
+      function updatePermissionWarning(agentId) {
+        const agent = agentList.find((item) => item.id === agentId);
+        if (!agent) return;
+        const selectedId = selectedPermissionProfileId(agent);
+        const profile = agent.permissionProfiles.find((item) => item.id === selectedId);
+        const warning = document.querySelector(`[data-permission-warning="${agentId}"]`);
+        if (!warning) return;
+        warning.textContent = profile?.dangerous ? profile.warning : '';
+        warning.hidden = !profile?.dangerous;
+      }
+      function populateSettingsControls() {
+        const el = (id) => document.getElementById(id);
+        el('set-remote-hostname').value = settings.remoteHostname || '';
+        el('set-font-family').value = settings.font.family;
+        el('set-font-size').value = settings.font.size;
+        el('set-font-weight').value = settings.font.weight;
+        el('switch-ligatures').classList.toggle('on', !!settings.font.ligatures);
+        el('set-cursor-style').value = settings.cursor.style;
+        el('switch-cursor-blink').classList.toggle('on', !!settings.cursor.blink);
+        el('set-line-height').value = settings.terminal.lineHeight;
+        el('set-padding').value = settings.terminal.padding;
+        el('set-scrollback').value = settings.terminal.scrollback;
+        el('switch-copy-on-select').classList.toggle('on', !!settings.behavior.copyOnSelect);
+        el('set-right-click').value = settings.behavior.rightClick;
+        el('set-bell').value = settings.behavior.bell;
+        el('switch-statusline').classList.toggle('on', !settings.statusline || settings.statusline.enabled !== false);
+        el('switch-sl-autohook').classList.toggle('on', !settings.statusline || settings.statusline.autoHook !== false);
+        el('switch-desktop-notify').classList.toggle('on', !settings.notifications || settings.notifications.desktop !== false);
+        renderAgentPermissionControls();
+        renderAgentLaunchOptionControls();
+      }
+
+      function saveSettings() {
+        fetch('/api/settings', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(settings),
+        });
+      }
+
+      function onSettingChanged() {
+        saveSettings();
+        const preset = themePresets[settings.theme] || themePresets['default-purple'];
+        applyThemeToPage(preset);
+        renderThemeGrid();
+      }
+
+      // ── Settings event handlers (delegated) ──
+      document.addEventListener('click', (e) => {
+        // ── Appearance section toggle ──
+        if (e.target.closest('#appearance-toggle-btn')) {
+          appearanceExpanded = !appearanceExpanded;
+          const body = document.getElementById('appearance-body');
+          const arrow = document.getElementById('appearance-arrow');
+          if (body) body.classList.toggle('collapsed', !appearanceExpanded);
+          if (arrow) arrow.classList.toggle('open', appearanceExpanded);
+          return;
+        }
+
+        // ── Theme swatch click ──
+        const swatch = e.target.closest('.theme-swatch');
+        if (swatch) {
+          settings.theme = swatch.dataset.theme;
+          onSettingChanged();
+          return;
+        }
+
+        // ── Toggle switches ──
+        const launchToggle = e.target.closest('[data-launch-option]');
+        if (launchToggle) {
+          const agentId = launchToggle.dataset.launchOptionAgent;
+          const optionId = launchToggle.dataset.launchOption;
+          const next = !defaultLaunchOption(agentId, optionId);
+          settings.agentLaunchOptions = {
+            ...(settings.agentLaunchOptions || {}),
+            [agentId]: { ...((settings.agentLaunchOptions || {})[agentId] || {}), [optionId]: next },
+          };
+          launchToggle.querySelector('.toggle-switch').classList.toggle('on', next);
+          onSettingChanged();
+          return;
+        }
+        if (e.target.closest('#toggle-ligatures')) {
+          settings.font.ligatures = !settings.font.ligatures;
+          document.getElementById('switch-ligatures').classList.toggle('on', settings.font.ligatures);
+          onSettingChanged();
+          return;
+        }
+        if (e.target.closest('#toggle-cursor-blink')) {
+          settings.cursor.blink = !settings.cursor.blink;
+          document.getElementById('switch-cursor-blink').classList.toggle('on', settings.cursor.blink);
+          onSettingChanged();
+          return;
+        }
+        if (e.target.closest('#toggle-copy-on-select')) {
+          settings.behavior.copyOnSelect = !settings.behavior.copyOnSelect;
+          document.getElementById('switch-copy-on-select').classList.toggle('on', settings.behavior.copyOnSelect);
+          onSettingChanged();
+          return;
+        }
+        if (e.target.closest('#toggle-statusline')) {
+          const on = !settings.statusline || settings.statusline.enabled !== false;
+          settings.statusline = { ...(settings.statusline || {}), enabled: !on };
+          document.getElementById('switch-statusline').classList.toggle('on', !on);
+          onSettingChanged();
+          return;
+        }
+        if (e.target.closest('#toggle-sl-autohook')) {
+          const on = !settings.statusline || settings.statusline.autoHook !== false;
+          settings.statusline = { ...(settings.statusline || {}), autoHook: !on };
+          document.getElementById('switch-sl-autohook').classList.toggle('on', !on);
+          onSettingChanged();
+          return;
+        }
+        if (e.target.closest('#toggle-desktop-notify')) {
+          const on = !settings.notifications || settings.notifications.desktop !== false;
+          settings.notifications = { ...(settings.notifications || {}), desktop: !on };
+          document.getElementById('switch-desktop-notify').classList.toggle('on', !on);
+          onSettingChanged();
+          return;
+        }
+
+        // ── Reset to defaults ──
+        if (e.target.closest('#reset-settings-btn')) {
+          fetch('/api/settings', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({}),
+          }).then(() => fetch('/api/settings').then(r => r.json())).then(s => {
+            settings = s;
+            populateSettingsControls();
+            const preset = themePresets[settings.theme] || themePresets['default-purple'];
+            applyThemeToPage(preset);
+            renderThemeGrid();
+          });
+          return;
+        }
+
+        // ── Hotkeys section toggle ──
+        if (e.target.closest('#hotkeys-toggle-btn')) {
+          hotkeysExpanded = !hotkeysExpanded;
+          const body = document.getElementById('hotkeys-body');
+          const arrow = document.getElementById('hotkeys-arrow');
+          if (body) body.classList.toggle('collapsed', !hotkeysExpanded);
+          if (arrow) arrow.classList.toggle('open', hotkeysExpanded);
+          return;
+        }
+
+        // ── Hotkey combo recording ──
+        const hotkeyCombo = e.target.closest('.hotkey-combo');
+        if (hotkeyCombo) {
+          const row = hotkeyCombo.closest('.hotkey-row');
+          startRecording(hotkeyCombo, row.dataset.id);
+          return;
+        }
+
+        // ── Hotkey toggle enabled/disabled ──
+        const hotkeyToggle = e.target.closest('.hotkey-toggle');
+        if (hotkeyToggle) {
+          const row = hotkeyToggle.closest('.hotkey-row');
+          const binding = hotkeyConfig.bindings.find(b => b.id === row.dataset.id);
+          if (binding) {
+            binding.enabled = binding.enabled === false ? true : false;
+            saveHotkeys();
+            renderHotkeys();
+          }
+          return;
+        }
+
+        // ── Hotkey delete ──
+        const hotkeyDelete = e.target.closest('.hotkey-delete');
+        if (hotkeyDelete) {
+          const row = hotkeyDelete.closest('.hotkey-row');
+          hotkeyConfig.bindings = hotkeyConfig.bindings.filter(b => b.id !== row.dataset.id);
+          saveHotkeys();
+          renderHotkeys();
+          return;
+        }
+
+        // ── Add new hotkey binding ──
+        if (e.target.closest('#hotkey-add-btn')) {
+          const newId = 'hk_' + Date.now();
+          hotkeyConfig.bindings.push({
+            id: newId, combo: '', action: '', label: '', enabled: true,
+          });
+          saveHotkeys();
+          renderHotkeys();
+          const newRow = document.querySelector(`.hotkey-row[data-id="${newId}"]`);
+          if (newRow) startRecording(newRow.querySelector('.hotkey-combo'), newId);
+          return;
+        }
+
+        // ── New Project button ──
+        if (e.target.closest('#new-project-btn')) {
+          showNewProjectForm();
+          return;
+        }
+
+        // ── New Project form actions ──
+        if (e.target.closest('#new-project-create')) {
+          createNewProject();
+          return;
+        }
+        if (e.target.closest('#new-project-cancel')) {
+          render();
+          return;
+        }
+
+        // ── Modifier+click and Alt+click on project links ──
+        const projectLink = e.target.closest('.project-card a, .favorites-bar a');
+        if (projectLink) {
+          // Alt+click → plain terminal (no agent)
+          if (e.altKey) {
+            e.preventDefault();
+            const url = new URL(projectLink.href);
+            url.searchParams.delete('agent');
+            url.searchParams.delete('claude');
+            window.open(url.toString(), '_blank');
+            return;
+          }
+
+          const mod = hotkeyConfig.modifierClick?.modifier || 'RightShift';
+          let modifierHeld = false;
+          if (mod === 'RightShift') modifierHeld = rightShiftHeld;
+          else if (mod === 'CtrlShift') modifierHeld = e.ctrlKey && e.shiftKey;
+          else if (mod === 'AltShift') modifierHeld = e.altKey && e.shiftKey;
+
+          if (modifierHeld) {
+            e.preventDefault();
+            const args = hotkeyConfig.modifierClick?.agentArgs || hotkeyConfig.modifierClick?.claudeArgs || '--dangerously-skip-permissions';
+            const url = new URL(projectLink.href);
+            url.searchParams.set('agentBypass', '1');
+            if (args) url.searchParams.set('agentArgs', args);
+            window.open(url.toString(), '_blank');
+            return;
+          }
+        }
+
+        const starBtn = e.target.closest('.star-btn');
+        if (starBtn) { toggleFavorite(starBtn.dataset.cwd); return; }
+
+        const gearBtn = e.target.closest('.gear-btn');
+        if (gearBtn) { showSettingsPopover(gearBtn); return; }
+
+        const agentBtn = e.target.closest('.agent-btn');
+        if (agentBtn) { showAgentPicker(agentBtn); return; }
+
+        const catBtn = e.target.closest('.cat-btn');
+        if (catBtn) { showPicker(catBtn); return; }
+
+        // Close picker if clicking outside
+        if (openPicker && !e.target.closest('.cat-picker')) closePicker();
+        if (openAgentPicker && !e.target.closest('.agent-picker')) closeAgentPicker();
+        if (openSettingsPopover && !e.target.closest('.settings-popover')) closeSettingsPopover();
+      });
+
+      // ── Settings change handlers for selects/inputs ──
+      document.addEventListener('change', (e) => {
+        const permissionAgentId = e.target.dataset.agentPermission;
+        if (permissionAgentId) {
+          settings.agentPermissions = {
+            ...(settings.agentPermissions || {}),
+            [permissionAgentId]: e.target.value,
+          };
+          updatePermissionWarning(permissionAgentId);
+          onSettingChanged();
+          return;
+        }
+        if (e.target.id === 'set-remote-hostname') { settings.remoteHostname = e.target.value.trim(); onSettingChanged(); refreshNetworkInfoDisplay(); }
+        if (e.target.id === 'set-font-family') { settings.font.family = e.target.value; onSettingChanged(); }
+        if (e.target.id === 'set-font-size') { settings.font.size = parseInt(e.target.value) || 14; onSettingChanged(); }
+        if (e.target.id === 'set-font-weight') { settings.font.weight = e.target.value; onSettingChanged(); }
+        if (e.target.id === 'set-cursor-style') { settings.cursor.style = e.target.value; onSettingChanged(); }
+        if (e.target.id === 'set-line-height') { settings.terminal.lineHeight = parseFloat(e.target.value) || 1.0; onSettingChanged(); }
+        if (e.target.id === 'set-padding') { settings.terminal.padding = parseInt(e.target.value) || 4; onSettingChanged(); }
+        if (e.target.id === 'set-scrollback') { settings.terminal.scrollback = parseInt(e.target.value) || 10000; onSettingChanged(); }
+        if (e.target.id === 'set-right-click') { settings.behavior.rightClick = e.target.value; onSettingChanged(); }
+        if (e.target.id === 'set-bell') { settings.behavior.bell = e.target.value; onSettingChanged(); }
+        if (e.target.id === 'set-default-agent') { settings.defaultAgent = e.target.value; onSettingChanged(); render(); }
+      });
+
+      function renderFavorites() {
+        const bar = document.getElementById('favorites-bar');
+        const favProjects = projects.filter(p => favorites.has(p.cwd))
+          .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+        if (favProjects.length === 0) {
+          bar.innerHTML = '<span class="empty">Star a project below to pin it here</span>';
+        } else {
+          bar.innerHTML = favProjects.map(p =>
+            `<a href="${escapeHtml(makeUrl(p.cwd))}" target="_blank">${escapeHtml(p.name)}</a>`
+          ).join('');
+        }
+      }
+
+      function renderCard(p) {
+        const active = favorites.has(p.cwd) ? ' active' : '';
+        const cat = catAssignments[p.cwd];
+        const catLabel = cat ? '\u2630' : '+';
+        const catClass = cat ? ' assigned' : '';
+        const effectiveAgentId = p.agent || settings.defaultAgent || 'claude';
+        const agentInfo = agentList.find(a => a.id === effectiveAgentId);
+        const agentColor = (agentInfo && agentInfo.color) || '#888888';
+        const agentName = (agentInfo && agentInfo.name) || effectiveAgentId;
+        const agentTitle = p.agent ? `Agent: ${agentName}` : `Agent: ${agentName} (default)`;
+        return `<div class="project-card">
+          <a href="${escapeHtml(makeUrl(p.cwd))}" target="_blank">${escapeHtml(p.name)}</a>
+          <span style="display:flex;align-items:center;gap:6px;flex-shrink:0">
+            <button class="gear-btn" data-cwd="${escapeHtml(p.cwd)}"
+              title="Project settings">⚙</button>
+            <button class="agent-btn${p.agent ? ' assigned' : ''}" data-cwd="${escapeHtml(p.cwd)}"
+              title="${agentTitle}" style="color:${agentColor}">\u25cf</button>
+            <button class="cat-btn${catClass}" data-cwd="${escapeHtml(p.cwd)}"
+              title="Set category">${catLabel}</button>
+            <button class="star-btn${active}" data-cwd="${escapeHtml(p.cwd)}"
+              title="${favorites.has(p.cwd) ? 'Remove from favorites' : 'Add to favorites'}"
+            >${favorites.has(p.cwd) ? '\u2605' : '\u2606'}</button>
+          </span>
+        </div>`;
+      }
+
+      const newProjectBtn = '<div class="new-project-card" id="new-project-btn"><span class="plus">+</span> New Project</div>';
+
+      function renderSections() {
+        const container = document.getElementById('project-sections');
+        const grouped = {};
+        const uncategorized = [];
+        for (const p of projects) {
+          const cat = catAssignments[p.cwd];
+          if (cat) {
+            if (!grouped[cat]) grouped[cat] = [];
+            grouped[cat].push(p);
+          } else {
+            uncategorized.push(p);
+          }
+        }
+        const allCats = Object.keys(grouped).sort((a, b) =>
+          a.localeCompare(b, undefined, { sensitivity: 'base' })
+        );
+
+        let html = '';
+        for (const cat of allCats) {
+          const items = grouped[cat];
+          if (!items || items.length === 0) continue;
+          html += `<div class="category-section">
+            <div class="category-header">${escapeHtml(cat)} <span class="count">${items.length}</span></div>
+            <div class="project-grid">${items.map(renderCard).join('')}</div>
+          </div>`;
+        }
+        const label = allCats.length > 0 ? 'Uncategorized' : 'All Projects';
+        const cards = uncategorized.map(renderCard).join('') + newProjectBtn;
+        html += `<div class="category-section">
+          <div class="category-header">${label} <span class="count">${uncategorized.length}</span></div>
+          <div class="project-grid">${cards}</div>
+        </div>`;
+        container.innerHTML = html;
+      }
+
+      function render() {
+        renderFavorites();
+        renderSections();
+      }
+
+      function showNewProjectForm() {
+        const btn = document.getElementById('new-project-btn');
+        if (!btn) return;
+        btn.outerHTML = `<div class="new-project-form" id="new-project-form">
+          <input type="text" id="new-project-name" placeholder="Project name..." autofocus>
+          <button id="new-project-create">Create</button>
+          <button class="cancel-btn" id="new-project-cancel">&times;</button>
+        </div>`;
+        const input = document.getElementById('new-project-name');
+        input.focus();
+        input.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') createNewProject();
+          if (e.key === 'Escape') render();
+        });
+      }
+
+      async function createNewProject() {
+        const input = document.getElementById('new-project-name');
+        const name = input?.value.trim();
+        if (!name) return;
+        try {
+          const res = await fetch('/api/projects', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name }),
+          });
+          const data = await res.json();
+          if (!res.ok) {
+            if (res.status === 409) {
+              // Folder exists — open it anyway
+              window.open(makeUrl(data.cwd), '_blank');
+              render();
+              return;
+            }
+            input.value = '';
+            input.placeholder = data.error || 'Error';
+            return;
+          }
+          projects.push({ name: data.name, cwd: data.cwd });
+          projects.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+          render();
+          window.open(makeUrl(data.cwd), '_blank');
+        } catch (err) {
+          input.value = '';
+          input.placeholder = 'Network error';
+        }
+      }
+
+      function toggleFavorite(cwd) {
+        if (favorites.has(cwd)) favorites.delete(cwd);
+        else favorites.add(cwd);
+        render();
+        fetch('/api/favorites', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify([...favorites]),
+        });
+      }
+
+      function saveCategories() {
+        fetch('/api/categories', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ assignments: catAssignments, order: catOrder }),
+        });
+      }
+
+      function assignCategory(cwd, category) {
+        if (category) {
+          catAssignments[cwd] = category;
+          if (!catOrder.includes(category)) catOrder.push(category);
+        } else {
+          delete catAssignments[cwd];
+        }
+        saveCategories();
+        render();
+      }
+
+      // ── Hotkey management ──
+      function saveHotkeys() {
+        fetch('/api/hotkeys', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(hotkeyConfig),
+        });
+      }
+
+      function renderHotkeys() {
+        const list = document.getElementById('hotkey-list');
+        if (!list) return;
+        list.innerHTML = hotkeyConfig.bindings.map(b => `
+          <div class="hotkey-row${b.enabled === false ? ' disabled' : ''}" data-id="${b.id}">
+            <span class="hotkey-combo" title="Click to re-record">${b.combo || 'Click to set'}</span>
+            <input class="hotkey-label-input" value="${(b.label || '').replace(/"/g, '&quot;')}" placeholder="Label...">
+            <input class="hotkey-action-input" value="${(b.action || '').replace(/"/g, '&quot;')}" placeholder="Command (e.g. /clear)">
+            <button class="hotkey-toggle${b.enabled === false ? ' off' : ''}" title="Toggle enabled">&#x25CF;</button>
+            <button class="hotkey-delete" title="Delete">&times;</button>
+          </div>
+        `).join('');
+
+        const modSelect = document.getElementById('modifier-select');
+        const argsInput = document.getElementById('agent-args-input');
+        if (modSelect) modSelect.value = hotkeyConfig.modifierClick?.modifier || 'RightShift';
+        if (argsInput) argsInput.value = hotkeyConfig.modifierClick?.agentArgs || hotkeyConfig.modifierClick?.claudeArgs || '--dangerously-skip-permissions';
+
+        list.querySelectorAll('.hotkey-label-input').forEach(input => {
+          input.addEventListener('blur', () => {
+            const row = input.closest('.hotkey-row');
+            const binding = hotkeyConfig.bindings.find(b => b.id === row.dataset.id);
+            if (binding) { binding.label = input.value.trim(); saveHotkeys(); }
+          });
+        });
+        list.querySelectorAll('.hotkey-action-input').forEach(input => {
+          input.addEventListener('blur', () => {
+            const row = input.closest('.hotkey-row');
+            const binding = hotkeyConfig.bindings.find(b => b.id === row.dataset.id);
+            if (binding) { binding.action = input.value.trim(); saveHotkeys(); }
+          });
+        });
+      }
+
+      // ── Key recorder ──
+      let recordingTarget = null;
+
+      function startRecording(comboEl, bindingId) {
+        stopRecording();
+        recordingTarget = { el: comboEl, bindingId };
+        comboEl.classList.add('recording');
+        comboEl.textContent = 'Press keys...';
+        document.addEventListener('keydown', onRecordKeyDown, true);
+      }
+
+      function stopRecording() {
+        if (!recordingTarget) return;
+        recordingTarget.el.classList.remove('recording');
+        document.removeEventListener('keydown', onRecordKeyDown, true);
+        recordingTarget = null;
+      }
+
+      function onRecordKeyDown(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (e.key === 'Escape') { stopRecording(); renderHotkeys(); return; }
+        const combo = normalizeCombo(e);
+        if (!combo) return;
+
+        if (RESERVED_COMBOS.has(combo)) {
+          recordingTarget.el.textContent = 'Reserved!';
+          setTimeout(() => { if (recordingTarget) recordingTarget.el.textContent = 'Press keys...'; }, 1000);
+          return;
+        }
+        const duplicate = hotkeyConfig.bindings.find(b =>
+          b.combo === combo && b.id !== recordingTarget.bindingId
+        );
+        if (duplicate) {
+          recordingTarget.el.textContent = 'Already used!';
+          setTimeout(() => { if (recordingTarget) recordingTarget.el.textContent = 'Press keys...'; }, 1000);
+          return;
+        }
+
+        const binding = hotkeyConfig.bindings.find(b => b.id === recordingTarget.bindingId);
+        if (binding) {
+          binding.combo = combo;
+          saveHotkeys();
+        }
+        stopRecording();
+        renderHotkeys();
+      }
+
+      // Category picker dropdown
+      let openPicker = null;
+      function closePicker() {
+        if (openPicker) { openPicker.remove(); openPicker = null; }
+      }
+
+      function showPicker(btn) {
+        closePicker();
+        closeSettingsPopover();
+        const cwd = btn.dataset.cwd;
+        const currentCat = catAssignments[cwd] || null;
+        const picker = document.createElement('div');
+        picker.className = 'cat-picker';
+
+        const catCounts = {};
+        for (const c of Object.values(catAssignments)) {
+          catCounts[c] = (catCounts[c] || 0) + 1;
+        }
+
+        let items = '';
+        const sortedCats = [...catOrder].sort((a, b) =>
+          a.localeCompare(b, undefined, { sensitivity: 'base' })
+        );
+        for (const cat of sortedCats) {
+          const cls = cat === currentCat ? ' active' : '';
+          const count = catCounts[cat] || 0;
+          const del = count === 0
+            ? ` <span class="cat-delete" data-del-cat="${cat.replace(/"/g, '&quot;')}" title="Delete empty category">\u00d7</span>`
+            : '';
+          items += `<button class="cat-picker-item${cls}" data-cat="${escapeHtml(cat)}">${escapeHtml(cat)}${del}</button>`;
+        }
+        if (currentCat) {
+          if (catOrder.length > 0) items += '<div class="cat-picker-sep"></div>';
+          items += `<button class="cat-picker-item remove" data-cat="">Remove category</button>`;
+        }
+        items += '<div class="cat-picker-sep"></div>';
+        items += `<div class="cat-picker-input">
+          <input type="text" placeholder="New category..." id="new-cat-input">
+          <button id="new-cat-add">Add</button>
+        </div>`;
+
+        picker.innerHTML = items;
+        document.body.appendChild(picker);
+        openPicker = picker;
+
+        placePopover(picker, btn);
+
+        picker.addEventListener('click', (e) => {
+          const del = e.target.closest('.cat-delete');
+          if (del) {
+            e.stopPropagation();
+            const delCat = del.dataset.delCat;
+            catOrder = catOrder.filter(c => c !== delCat);
+            saveCategories();
+            showPicker(btn);
+            return;
+          }
+          const item = e.target.closest('.cat-picker-item');
+          if (item) {
+            assignCategory(cwd, item.dataset.cat || null);
+            closePicker();
+            return;
+          }
+          if (e.target.id === 'new-cat-add') {
+            const input = document.getElementById('new-cat-input');
+            const name = input.value.trim();
+            if (name) {
+              assignCategory(cwd, name);
+              closePicker();
+            }
+          }
+        });
+
+        setTimeout(() => {
+          const input = document.getElementById('new-cat-input');
+          if (input) {
+            input.focus();
+            input.addEventListener('keydown', (e) => {
+              if (e.key === 'Enter') {
+                const name = input.value.trim();
+                if (name) { assignCategory(cwd, name); closePicker(); }
+              }
+            });
+          }
+        }, 0);
+      }
+
+      let openAgentPicker = null;
+      function closeAgentPicker() {
+        if (openAgentPicker) { openAgentPicker.remove(); openAgentPicker = null; }
+      }
+
+      function agentItemsHtml(current) {
+        let items = `<button class="cat-picker-item${current === null ? ' active' : ''}" data-agent="">Default (${settings.defaultAgent || 'claude'})</button>`;
+        for (const a of agentList) {
+          const cls = (current === a.id ? ' active' : '') + (a.installed ? '' : ' disabled');
+          const suffix = a.installed ? '' : ' (not installed)';
+          items += `<button class="cat-picker-item${cls}" data-agent="${a.id}">
+            <span style="color:${a.color}">●</span> ${a.name}${suffix}</button>`;
+        }
+        return items;
+      }
+
+      // Per-project launch-option overrides for the project's effective agent:
+      // a tri-state select (inherit Settings default / on / off) per option.
+      function launchOptionsHtml(proj) {
+        const agentId = proj.agent || settings.defaultAgent || 'claude';
+        const agent = agentList.find((a) => a.id === agentId);
+        if (!agent || !Array.isArray(agent.launchOptions) || agent.launchOptions.length === 0) return '';
+        const overrides = proj.launchOptions || {};
+        return agent.launchOptions.map((opt) => {
+          const current = overrides[opt.id] === true ? 'on' : overrides[opt.id] === false ? 'off' : 'inherit';
+          const inheritLabel = `Default (${defaultLaunchOption(agent.id, opt.id) ? 'on' : 'off'})`;
+          const option = (value, label) =>
+            `<option value="${value}"${current === value ? ' selected' : ''}>${label}</option>`;
+          return `
+            <div class="cat-picker-input sp-launch-option" title="${(opt.description || '').replace(/"/g, '&quot;')}">
+              <label style="font-size:11px;flex:1">${opt.label}</label>
+              <select data-sp-launch-option="${opt.id}">
+                ${option('inherit', inheritLabel)}${option('on', 'On')}${option('off', 'Off')}
+              </select>
+            </div>
+          `;
+        }).join('');
+      }
+
+      function placePopover(picker, btn) {
+        const r = btn.getBoundingClientRect();
+        picker.style.left = Math.min(r.left, window.innerWidth - 180) + 'px';
+        picker.style.top = (r.bottom + 4) + 'px';
+        requestAnimationFrame(() => {
+          const pr = picker.getBoundingClientRect();
+          if (pr.bottom > window.innerHeight - 8) {
+            picker.style.top = Math.max(8, r.top - pr.height - 4) + 'px';
+          }
+        });
+      }
+
+      function showAgentPicker(btn) {
+        closeAgentPicker();
+        closePicker();
+        closeSettingsPopover();
+        const cwd = btn.dataset.cwd;
+        const proj = projects.find(p => p.cwd === cwd);
+        const current = (proj && proj.agent) || null;
+        const picker = document.createElement('div');
+        picker.className = 'cat-picker agent-picker';
+
+        const items = agentItemsHtml(current);
+        picker.innerHTML = items;
+        document.body.appendChild(picker);
+        openAgentPicker = picker;
+
+        placePopover(picker, btn);
+
+        picker.addEventListener('click', async (e) => {
+          const item = e.target.closest('.cat-picker-item');
+          if (!item || item.classList.contains('disabled')) return;
+          const agent = item.dataset.agent || null;
+          try {
+            const res = await fetch('/api/project-agent', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ cwd, agent }),
+            });
+            if (res.ok && proj) proj.agent = agent;
+          } catch {}
+          closeAgentPicker();
+          render();
+        });
+      }
+
+      let openSettingsPopover = null;
+      function closeSettingsPopover() {
+        if (openSettingsPopover) { openSettingsPopover.remove(); openSettingsPopover = null; }
+      }
+
+      /** Re-fetch everything a rename/delete can touch, then re-render. */
+      async function reloadProjects() {
+        const [proj, favs, cats] = await Promise.all([
+          fetch('/api/projects').then(r => r.json()),
+          fetch('/api/favorites').then(r => r.json()),
+          fetch('/api/categories').then(r => r.json()),
+        ]);
+        projects = proj;
+        favorites = new Set(favs);
+        catAssignments = cats.assignments || {};
+        catOrder = cats.order || [];
+        render();
+      }
+
+      function showSettingsPopover(btn) {
+        closeSettingsPopover();
+        closePicker();
+        closeAgentPicker();
+        const cwd = btn.dataset.cwd;
+        const proj = projects.find(p => p.cwd === cwd);
+        if (!proj) return;
+        const currentCat = catAssignments[cwd] || null;
+
+        const picker = document.createElement('div');
+        picker.className = 'cat-picker settings-popover';
+
+        let catItems = '';
+        const sortedCats = [...catOrder].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+        for (const cat of sortedCats) {
+          const cls = cat === currentCat ? ' active' : '';
+          catItems += `<button class="cat-picker-item${cls}" data-cat="${escapeHtml(cat)}">${escapeHtml(cat)}</button>`;
+        }
+        if (currentCat) {
+          catItems += `<button class="cat-picker-item remove" data-cat="">Remove category</button>`;
+        }
+
+        picker.innerHTML = `
+          <div class="sp-label">Rename</div>
+          <div class="cat-picker-input">
+            <input type="text" id="sp-rename-input" value="${proj.name.replace(/"/g, '&quot;')}">
+            <button id="sp-rename-save">Save</button>
+          </div>
+          <div class="cat-picker-sep"></div>
+          <div class="sp-label">Agent</div>
+          ${agentItemsHtml(proj.agent || null)}
+          ${launchOptionsHtml(proj)}
+          <div class="cat-picker-sep"></div>
+          <div class="sp-label">Category</div>
+          ${catItems || '<div class="sp-label" style="text-transform:none">No categories yet</div>'}
+          <div class="cat-picker-sep"></div>
+          <button class="cat-picker-item sp-delete" id="sp-delete">Delete…</button>
+          <div class="sp-error" id="sp-error" hidden></div>
+        `;
+        document.body.appendChild(picker);
+        openSettingsPopover = picker;
+        placePopover(picker, btn);
+
+        const errEl = picker.querySelector('#sp-error');
+        const showError = (msg) => { errEl.textContent = msg; errEl.hidden = false; };
+
+        async function doRename() {
+          const newName = picker.querySelector('#sp-rename-input').value.trim();
+          if (!newName || newName === proj.name) return;
+          try {
+            const res = await fetch('/api/projects', {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ cwd, newName }),
+            });
+            const data = await res.json();
+            if (!res.ok) return showError(data.error || `Rename failed (${res.status})`);
+            closeSettingsPopover();
+            await reloadProjects();
+          } catch (err) {
+            showError('Rename failed: ' + err.message);
+          }
+        }
+
+        async function doDelete() {
+          try {
+            const res = await fetch('/api/projects', {
+              method: 'DELETE',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ cwd }),
+            });
+            const data = await res.json();
+            if (!res.ok) return showError(data.error || `Delete failed (${res.status})`);
+            closeSettingsPopover();
+            await reloadProjects();
+          } catch (err) {
+            showError('Delete failed: ' + err.message);
+          }
+        }
+
+        picker.addEventListener('click', async (e) => {
+          if (e.target.id === 'sp-rename-save') return doRename();
+
+          if (e.target.id === 'sp-delete') {
+            // Swap the delete button for an inline confirm. Stop propagation:
+            // the swap detaches e.target, so the document-level outside-click
+            // handler would see closest('.settings-popover') === null and
+            // close the popover before the confirm can be used.
+            e.stopPropagation();
+            e.target.outerHTML = `<span class="cat-picker-input" style="display:flex;align-items:center;gap:6px;padding:4px 10px">
+              <span style="font-size:11px">Move <b>${proj.name.replace(/</g, '&lt;')}</b> to Recycle Bin?</span>
+              <button id="sp-delete-yes">Yes</button>
+              <button id="sp-delete-no">No</button>
+            </span>`;
+            return;
+          }
+          if (e.target.id === 'sp-delete-yes') return doDelete();
+          if (e.target.id === 'sp-delete-no') { closeSettingsPopover(); return; }
+
+          const agentItem = e.target.closest('.cat-picker-item[data-agent]');
+          if (agentItem && !agentItem.classList.contains('disabled')) {
+            const agent = agentItem.dataset.agent || null;
+            try {
+              const res = await fetch('/api/project-agent', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ cwd, agent }),
+              });
+              if (res.ok) proj.agent = agent;
+            } catch {}
+            closeSettingsPopover();
+            render();
+            return;
+          }
+
+          const catItem = e.target.closest('.cat-picker-item[data-cat]');
+          if (catItem) {
+            assignCategory(cwd, catItem.dataset.cat || null);
+            closeSettingsPopover();
+            return;
+          }
+        });
+
+        picker.addEventListener('change', async (e) => {
+          const optionId = e.target.dataset.spLaunchOption;
+          if (!optionId) return;
+          const value = e.target.value === 'on' ? true : e.target.value === 'off' ? false : null;
+          try {
+            const res = await fetch('/api/project-launch-option', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ cwd, option: optionId, value }),
+            });
+            const data = await res.json();
+            if (!res.ok) return showError(data.error || `Save failed (${res.status})`);
+            proj.launchOptions = data.launchOptions || {};
+          } catch (err) {
+            showError('Save failed: ' + err.message);
+          }
+        });
+
+        const renameInput = picker.querySelector('#sp-rename-input');
+        renameInput.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') doRename();
+          if (e.key === 'Escape') closeSettingsPopover();
+        });
+      }
+
+      // ── Hotkey modifier-click config change handlers ──
+      document.getElementById('modifier-select')?.addEventListener('change', (e) => {
+        if (!hotkeyConfig.modifierClick) hotkeyConfig.modifierClick = {};
+        hotkeyConfig.modifierClick.modifier = e.target.value;
+        saveHotkeys();
+      });
+      document.getElementById('agent-args-input')?.addEventListener('blur', (e) => {
+        if (!hotkeyConfig.modifierClick) hotkeyConfig.modifierClick = {};
+        hotkeyConfig.modifierClick.agentArgs = e.target.value.trim();
+        delete hotkeyConfig.modifierClick.claudeArgs;
+        saveHotkeys();
+      });
+
+      // Re-enable scrolling when this tab becomes active
+      if (window.electronAPI?.onTabActivated) {
+        window.electronAPI.onTabActivated(() => {
+          document.documentElement.style.overflow = '';
+          requestAnimationFrame(() => {
+            document.documentElement.style.overflow = 'auto';
+          });
+        });
+      }
+
+      Promise.all([
+        fetch('/api/projects').then(r => r.json()),
+        fetch('/api/favorites').then(r => r.json()),
+        fetch('/api/categories').then(r => r.json()),
+        fetch('/api/hotkeys').then(r => r.json()),
+        fetch('/api/settings').then(r => r.json()),
+        fetch('/api/theme-presets').then(r => r.json()),
+        fetch('/api/version').then(r => r.json()),
+        fetch('/api/network-info').then(r => r.json()).catch(() => ({})),
+        fetch('/api/auth-status').then(r => r.json()).catch(() => ({ passwordSet: false })),
+        fetch('/api/agents').then(r => r.json()).catch(() => []),
+      ]).then(([proj, favs, cats, hotkeys, sett, presets, ver, net, auth, agentsResp]) => {
+        projects = proj;
+        favorites = new Set(favs);
+        catAssignments = cats.assignments || {};
+        catOrder = cats.order || [];
+        hotkeyConfig = hotkeys;
+        settings = sett;
+        themePresets = presets;
+        agentList = agentsResp;
+        const agentSel = document.getElementById('set-default-agent');
+        if (agentSel) {
+          agentSel.innerHTML = agentList.map(a =>
+            `<option value="${a.id}"${a.installed ? '' : ' disabled'}>${a.name}${a.installed ? '' : ' (not installed)'}</option>`
+          ).join('');
+          agentSel.value = settings.defaultAgent || 'claude';
+        }
+        document.getElementById('version-label').textContent = 'v' + ver.version;
+        networkInfo = net;
+        refreshNetworkInfoDisplay();
+        document.getElementById('restart-btn').addEventListener('click', () => {
+          // IPC, not /api — restarting must hit only this window's process.
+          // In a plain browser (no bridge) the button does nothing.
+          if (window.electronRemote) window.electronRemote.restart().catch(() => {});
+        });
+        const $serversBtn = document.getElementById('servers-btn');
+        // Electron-only: in a plain browser there is no picker to open.
+        if (window.electronRemote) {
+          $serversBtn.addEventListener('click', () => {
+            window.electronRemote.pickerOpen().catch(() => {});
+          });
+        } else {
+          $serversBtn.style.display = 'none';
+        }
+        const qrOverlay = document.getElementById('qr-overlay');
+        document.getElementById('qr-close-btn').addEventListener('click', () => { qrOverlay.style.display = 'none'; });
+        qrOverlay.addEventListener('click', (e) => { if (e.target === qrOverlay) qrOverlay.style.display = 'none'; });
+        render();
+        renderHotkeys();
+        renderThemeGrid();
+        populateSettingsControls();
+        wireRemoteAccessSettings(auth && auth.passwordSet);
+        wireRemoteServerSettings();
+        const preset = themePresets[settings.theme] || themePresets['default-purple'];
+        applyThemeToPage(preset);
+      });
+
+      function wireRemoteServerSettings() {
+        // The IPC bridge only exists inside the Electron app — in a plain
+        // browser (phone/tablet) the section stays hidden.
+        if (!window.electronRemote) return;
+        document.getElementById('remote-connect-section').style.display = '';
+        const $label = document.getElementById('remote-connected-label');
+
+        window.electronRemote.getConfig().then((cfg) => {
+          if (!cfg) return;
+          $label.textContent = cfg.name
+            ? `Connected to ${cfg.name}${cfg.remoteServer ? ` (${cfg.remoteServer})` : ''}`
+            : 'Connected to this machine';
+        }).catch(() => {});
+
+        // Opens the picker, which spawns a separate process — this window
+        // keeps running on its own server.
+        document.getElementById('remote-switch-btn').addEventListener('click', () => {
+          window.electronRemote.pickerOpen().catch(() => {});
+        });
+      }
+
+      function wireRemoteAccessSettings(passwordSet) {
+        const $input = document.getElementById('set-remote-password');
+        const $btn = document.getElementById('set-password-btn');
+        const $status = document.getElementById('set-password-status');
+
+        if (passwordSet) {
+          $input.placeholder = '••••• (change)';
+          $status.textContent = 'Set';
+          $status.style.color = 'var(--success, #50c878)';
+        }
+
+        $btn.addEventListener('click', async () => {
+          const pwd = $input.value;
+          if (!pwd || pwd.length < 12) {
+            $status.textContent = 'Min 12 characters';
+            $status.style.color = 'var(--danger, #e05555)';
+            return;
+          }
+          try {
+            const res = await fetch('/api/auth-password', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ password: pwd }),
+            });
+            if (!res.ok) {
+              const err = await res.json().catch(() => ({}));
+              $status.textContent = err.error || 'Failed';
+              $status.style.color = 'var(--danger, #e05555)';
+              return;
+            }
+            $input.value = '';
+            $input.placeholder = '••••• (change)';
+            $status.textContent = 'Saved';
+            $status.style.color = 'var(--success, #50c878)';
+          } catch {
+            $status.textContent = 'Network error';
+            $status.style.color = 'var(--danger, #e05555)';
+          }
+        });
+
+        if (!passwordSet) showPasswordSetupModal();
+      }
+
+      function showPasswordSetupModal() {
+        const $overlay = document.getElementById('password-setup-overlay');
+        const $input = document.getElementById('setup-password-input');
+        const $error = document.getElementById('setup-password-error');
+        const $save = document.getElementById('setup-password-save');
+        const $skip = document.getElementById('setup-password-skip');
+        $overlay.style.display = 'flex';
+        setTimeout(() => $input.focus(), 50);
+
+        function close() {
+          $overlay.style.display = 'none';
+          $input.value = '';
+          $error.style.display = 'none';
+        }
+
+        async function save() {
+          const pwd = $input.value;
+          if (!pwd || pwd.length < 12) {
+            $error.textContent = 'Password must be at least 12 characters.';
+            $error.style.display = 'block';
+            return;
+          }
+          try {
+            const res = await fetch('/api/auth-password', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ password: pwd }),
+            });
+            if (!res.ok) {
+              const err = await res.json().catch(() => ({}));
+              $error.textContent = err.error || 'Failed to save.';
+              $error.style.display = 'block';
+              return;
+            }
+            document.getElementById('set-password-status').textContent = 'Set';
+            document.getElementById('set-password-status').style.color = 'var(--success, #50c878)';
+            document.getElementById('set-remote-password').placeholder = '••••• (change)';
+            close();
+          } catch {
+            $error.textContent = 'Network error.';
+            $error.style.display = 'block';
+          }
+        }
+
+        $save.addEventListener('click', save);
+        $skip.addEventListener('click', close);
+        $input.addEventListener('keydown', (e) => { if (e.key === 'Enter') save(); });
+      }
+    }
+  </script>
+</body>
+</html>

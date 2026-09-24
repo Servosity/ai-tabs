@@ -1,0 +1,13 @@
+Package: ai-tabs
+Version: {{VERSION}}
+Section: devel
+Priority: optional
+Architecture: amd64
+Depends: nodejs (>= 18.0.0) | node (>= 18.0.0), git, npm
+Maintainer: Servosity <support@servosity.com>
+Homepage: https://github.com/Servosity/ai-tabs
+Description: Browser-based tab manager for AI coding-agent terminals
+ ai-tabs provides a tabbed browser interface for managing multiple
+ AI coding-agent terminal sessions (Claude Code, Codex CLI, Gemini CLI).
+ It runs a local web server and opens a browser window with tab
+ management capabilities.

@@ -1,0 +1,23 @@
+node_modules/
+data/
+chrome-profile/
+dist/
+installer/*/build/
+screenshot*.png
+screenshot*.ps1
+get-appid.ps1
+test-icon.ps1
+make-icon.ps1
+.claude/
+.worktrees/
+
+# Local dev scratch / working-copy process
+working_*.js
+take-screenshot.ps1
+.superpowers/
+
+# Personal agent instructions, secrets, logs
+CLAUDE.local.md
+.env
+*.log
+*.pem

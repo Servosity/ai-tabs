@@ -1,0 +1,57 @@
+#!/bin/bash
+# ai-tabs macOS .pkg post-install script
+# Runs npm install, creates .app bundle and CLI symlink
+
+set -e
+
+INSTALL_DIR="${HOME}/.local/share/ai-tabs"
+
+# ── npm install ──────────────────────────────────────────────────────────────
+cd "$INSTALL_DIR"
+npm install --no-fund --no-audit 2>/dev/null || npm install
+
+# ── Make launcher executable ─────────────────────────────────────────────────
+chmod +x "${INSTALL_DIR}/ai-tabs.sh"
+
+# ── CLI symlink ──────────────────────────────────────────────────────────────
+mkdir -p "${HOME}/.local/bin"
+ln -sf "${INSTALL_DIR}/ai-tabs.sh" "${HOME}/.local/bin/ai-tabs"
+
+# ── .app bundle ──────────────────────────────────────────────────────────────
+APP_DIR="${HOME}/Applications/ai-tabs.app"
+mkdir -p "${APP_DIR}/Contents/MacOS"
+mkdir -p "${APP_DIR}/Contents/Resources"
+
+cat > "${APP_DIR}/Contents/Info.plist" << 'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>ai-tabs</string>
+    <key>CFBundleDisplayName</key>
+    <string>ai-tabs</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.servosity.ai-tabs</string>
+    <key>CFBundleVersion</key>
+    <string>1.0</string>
+    <key>CFBundleExecutable</key>
+    <string>ai-tabs</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+</dict>
+</plist>
+PLIST
+
+cat > "${APP_DIR}/Contents/MacOS/ai-tabs" << LAUNCHER
+#!/bin/bash
+cd "${INSTALL_DIR}"
+if ! lsof -iTCP:25283 -sTCP:LISTEN -t >/dev/null 2>&1; then
+    nohup node server.js > /dev/null 2>&1 &
+    sleep 2
+fi
+open "http://localhost:25283"
+LAUNCHER
+chmod +x "${APP_DIR}/Contents/MacOS/ai-tabs"
+
+exit 0

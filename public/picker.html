@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>ai-tabs — choose a server</title>
+  <style>
+    :root { --bg:#1e1e2e; --fg:#cdd6f4; --muted:#9399b2; --border:#313244;
+            --accent:#89b4fa; --danger:#f38ba8; --input-bg:#181825; }
+    * { box-sizing: border-box; }
+    body { margin:0; padding:16px; background:var(--bg); color:var(--fg);
+           font:13px system-ui, sans-serif; user-select:none; }
+    h1 { font-size:13px; font-weight:600; margin:0 0 12px; color:var(--muted); }
+    ul { list-style:none; margin:0 0 12px; padding:0; }
+    li { display:flex; align-items:center; gap:8px; padding:9px 10px; margin-bottom:6px;
+         border:1px solid var(--border); border-radius:6px; cursor:pointer; }
+    li:hover { border-color:var(--accent); }
+    .name { flex:1; }
+    .url { font-size:11px; color:var(--muted); }
+    .remove { border:none; background:none; color:var(--muted); cursor:pointer;
+              font-size:15px; line-height:1; padding:2px 5px; }
+    .remove:hover { color:var(--danger); }
+    button.action { width:100%; padding:8px; border-radius:6px; border:1px solid var(--border);
+                    background:var(--input-bg); color:var(--fg); cursor:pointer; }
+    button.action:hover { border-color:var(--accent); }
+    #notice { color:var(--danger); font-size:12px; margin-bottom:10px; min-height:15px; }
+    form { display:none; flex-direction:column; gap:7px; margin-top:10px; }
+    input { padding:7px; border-radius:5px; border:1px solid var(--border);
+            background:var(--input-bg); color:var(--fg); font-size:12px;
+            user-select:text; }
+  </style>
+</head>
+<body>
+  <h1>Open ai-tabs on…</h1>
+  <div id="notice"></div>
+  <ul id="list"></ul>
+  <button class="action" id="add-btn">+ Add server</button>
+  <form id="add-form">
+    <input id="f-name" placeholder="Name (e.g. VM dev)" autocomplete="off">
+    <input id="f-url" placeholder="Address (e.g. 192.168.1.5)" autocomplete="off">
+    <input id="f-key" type="password" placeholder="Remote-access password">
+    <button class="action" type="submit" id="f-save">Check and add</button>
+  </form>
+
+  <script>
+    const api = window.electronRemote;
+    const $list = document.getElementById('list');
+    const $notice = document.getElementById('notice');
+    const $form = document.getElementById('add-form');
+
+    const params = new URLSearchParams(location.search);
+    if (params.get('notice')) $notice.textContent = params.get('notice');
+
+    function note(text) { $notice.textContent = text || ''; }
+
+    async function render() {
+      const { servers } = await api.pickerList();
+      $list.innerHTML = '';
+      for (const s of servers) {
+        const li = document.createElement('li');
+        const label = document.createElement('div');
+        label.className = 'name';
+        label.textContent = s.name;
+        if (s.url) {
+          const u = document.createElement('div');
+          u.className = 'url';
+          u.textContent = s.url;
+          label.appendChild(u);
+        }
+        li.appendChild(label);
+        if (s.url) {
+          const x = document.createElement('button');
+          x.className = 'remove';
+          x.textContent = '×';
+          x.title = 'Remove from list';
+          x.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            await api.pickerRemove(s.id);
+            render();
+          });
+          li.appendChild(x);
+        }
+        li.addEventListener('click', async () => {
+          note('');
+          const res = await api.pickerLaunch(s.id);
+          if (!res.ok) note(res.error || 'Could not launch.');
+        });
+        $list.appendChild(li);
+      }
+    }
+
+    document.getElementById('add-btn').addEventListener('click', () => {
+      $form.style.display = $form.style.display === 'flex' ? 'none' : 'flex';
+    });
+
+    $form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const $save = document.getElementById('f-save');
+      $save.disabled = true;
+      note('Checking…');
+      const res = await api.pickerAdd({
+        name: document.getElementById('f-name').value,
+        url: document.getElementById('f-url').value,
+        key: document.getElementById('f-key').value,
+      });
+      $save.disabled = false;
+      if (!res.ok) { note(res.error || 'Could not add that server.'); return; }
+      note('');
+      $form.reset();
+      $form.style.display = 'none';
+      render();
+    });
+
+    render();
+  </script>
+</body>
+</html>

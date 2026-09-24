@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<installer-gui-script minSpecVersion="2">
+    <title>ai-tabs</title>
+    <welcome file="welcome.html" />
+    <conclusion file="conclusion.html" />
+    <options customize="never" require-scripts="true" hostArchitectures="x86_64,arm64" />
+    <domains enable_anywhere="false" enable_currentUserHome="true" enable_localSystem="false" />
+    <choices-outline>
+        <line choice="default">
+            <line choice="com.servosity.ai-tabs" />
+        </line>
+    </choices-outline>
+    <choice id="default" />
+    <choice id="com.servosity.ai-tabs" visible="false">
+        <pkg-ref id="com.servosity.ai-tabs" />
+    </choice>
+    <pkg-ref id="com.servosity.ai-tabs" version="0.0.0" onConclusion="none">ai-tabs-core.pkg</pkg-ref>
+</installer-gui-script>

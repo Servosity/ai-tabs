@@ -1,0 +1,36 @@
+#!/bin/bash
+# ai-tabs macOS .pkg pre-install script
+# Checks that Node.js 18+ is available
+
+check_node() {
+    if ! command -v node >/dev/null 2>&1; then
+        echo "ERROR: Node.js is not installed."
+        echo ""
+        echo "Please install Node.js 18+ from https://nodejs.org"
+        echo "or via: brew install node"
+        return 1
+    fi
+
+    local node_version
+    node_version=$(node --version | sed 's/^v//')
+    local node_major
+    node_major=$(echo "$node_version" | cut -d. -f1)
+
+    if [[ "$node_major" -lt 18 ]]; then
+        echo "ERROR: Node.js $node_version found, but 18+ is required."
+        echo ""
+        echo "Please update Node.js from https://nodejs.org"
+        return 1
+    fi
+
+    echo "Node.js $node_version OK"
+    return 0
+}
+
+if ! check_node; then
+    # Show error dialog via osascript since pkg installer hides stdout
+    osascript -e 'display dialog "ai-tabs requires Node.js 18+.\n\nPlease install from https://nodejs.org and try again." buttons {"OK"} default button "OK" with icon stop with title "ai-tabs Installer"' 2>/dev/null
+    exit 1
+fi
+
+exit 0

@@ -1,0 +1,47 @@
+{
+  "name": "ai-tabs",
+  "short_name": "ai-tabs",
+  "description": "AI agent terminal launcher & remote access",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "display_override": ["tabbed"],
+  "background_color": "#1a1a2e",
+  "theme_color": "#1a1a2e",
+  "orientation": "any",
+  "categories": ["developer", "utilities"],
+  "tab_strip": {
+    "home_tab": "auto",
+    "new_tab_button": "absent"
+  },
+  "launch_handler": {
+    "client_mode": "navigate-new"
+  },
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Mobile Remote",
+      "url": "/mobile.html",
+      "description": "Remote session access for mobile"
+    }
+  ]
+}
