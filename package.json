@@ -1,6 +1,6 @@
 {
   "name": "ai-tabs",
-  "version": "0.35.1",
+  "version": "0.35.2",
   "description": "Electron tab manager for AI coding-agent terminals (Claude Code, Codex, Gemini, ...)",
   "main": "main.js",
   "repository": "github:servosity/ai-tabs",

@@ -40,13 +40,6 @@ An Electron-based tab manager for AI coding-agent terminals — [Claude Code](ht
 
 ## Installation
 
-> **Packaged installers are behind the source.** The most recent packaged
-> release on the [Releases](https://github.com/Servosity/ai-tabs/releases)
-> page predates the ai-tabs rename (`cc-tabs v0.16.0`), so the GUI installers
-> and one-liners below install that older version. For the current version,
-> use the [manual install](#manual-all-platforms) until the next packaged
-> release is cut.
-
 ### Windows
 
 **GUI installer** — download the latest `ai-tabs-setup-<version>.exe` from [Releases](https://github.com/Servosity/ai-tabs/releases/latest) and run it. Checks prerequisites, installs dependencies, creates shortcuts.
