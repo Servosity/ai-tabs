@@ -6,7 +6,10 @@ const path = require('node:path');
 
 const {
   LOCAL_ID, loadServers, saveServers, generateId, parseServerArg,
-  resolveLaunchTarget, addServer, removeServer, normalizeUrl, seedServersFile,
+  resolveLaunchTarget, addServer, updateServer, removeServer, normalizeUrl,
+  parseAddress, isIpAddress, withHostname, hostnameOf, resolveHostIp,
+  localSubnets, isSameSubnet, subnetHosts, rankAddresses,
+  looksLikeAiTabs, scanLanForServers, rescanServer, seedServersFile,
 } = require('../lib/servers');
 const { validateServer } = require('../lib/servers');
 
@@ -201,4 +204,396 @@ test('validateServer reports an unreachable host', async () => {
   });
   assert.strictEqual(res.ok, false);
   assert.match(res.error, /Cannot reach/);
+});
+
+// ── Address helpers ──
+
+test('isIpAddress distinguishes addresses from machine names', () => {
+  assert.strictEqual(isIpAddress('192.168.1.5'), true);
+  assert.strictEqual(isIpAddress('::1'), true);
+  assert.strictEqual(isIpAddress('[::1]'), true);
+  assert.strictEqual(isIpAddress('desktop-pc'), false);
+  assert.strictEqual(isIpAddress(''), false);
+});
+
+test('parseAddress reports the hostname, port, and whether it is an IP', () => {
+  assert.deepStrictEqual(parseAddress('192.168.1.5', 25283), {
+    origin: 'http://192.168.1.5:25283', hostname: '192.168.1.5', port: '25283', isIp: true,
+  });
+  assert.deepStrictEqual(parseAddress('desktop-pc:9000', 25283), {
+    origin: 'http://desktop-pc:9000', hostname: 'desktop-pc', port: '9000', isIp: false,
+  });
+});
+
+test('withHostname swaps the host but keeps scheme and port', () => {
+  assert.strictEqual(withHostname('http://192.168.1.5:25283', '10.0.0.7'), 'http://10.0.0.7:25283');
+  assert.strictEqual(withHostname('https://old:9000', '10.0.0.7'), 'https://10.0.0.7:9000');
+});
+
+test('resolveHostIp returns an IP unchanged without consulting the resolver', async () => {
+  const never = () => { throw new Error('should not be called'); };
+  assert.strictEqual(await resolveHostIp('10.0.0.3', never), '10.0.0.3');
+});
+
+test('resolveHostIp uses the OS resolver for a machine name', async () => {
+  const lookup = async (name) => {
+    assert.strictEqual(name, 'desktop-pc');
+    return { address: '192.168.1.42', family: 4 };
+  };
+  assert.strictEqual(await resolveHostIp('desktop-pc', lookup), '192.168.1.42');
+});
+
+test('resolveHostIp accepts the array form of lookup and rejects an empty name', async () => {
+  const lookup = async () => [{ address: '10.0.0.9', family: 4 }];
+  assert.strictEqual(await resolveHostIp('box', lookup), '10.0.0.9');
+  await assert.rejects(() => resolveHostIp('', lookup));
+});
+
+// ── updateServer ──
+
+test('updateServer changes the address and keeps the id and key', (t) => {
+  const file = tmpFile(t);
+  const { server } = addServer(file, { name: 'Desktop', url: '192.168.1.5', key: 'pw' });
+  const res = updateServer(file, server.id, { url: '192.168.1.90' });
+  assert.strictEqual(res.ok, true);
+
+  const target = resolveLaunchTarget(['.', `--server=${server.id}`], file);
+  assert.strictEqual(target.url, 'http://192.168.1.90:25283');
+  assert.strictEqual(target.key, 'pw');
+  assert.strictEqual(target.name, 'Desktop');
+});
+
+test('updateServer keeps the stored key when the new key is blank, and replaces it otherwise', (t) => {
+  const file = tmpFile(t);
+  const { server } = addServer(file, { name: 'Desktop', url: '192.168.1.5', key: 'pw' });
+  updateServer(file, server.id, { key: '' });
+  assert.strictEqual(loadServers(file).servers[1].key, 'pw');
+  updateServer(file, server.id, { key: 'newpw' });
+  assert.strictEqual(loadServers(file).servers[1].key, 'newpw');
+});
+
+test('updateServer sets and clears the machine name', (t) => {
+  const file = tmpFile(t);
+  const { server } = addServer(file, { name: 'Desktop', url: '192.168.1.5', key: 'pw' });
+  updateServer(file, server.id, { host: 'desktop-pc' });
+  assert.strictEqual(loadServers(file).servers[1].host, 'desktop-pc');
+  updateServer(file, server.id, { host: '' });
+  assert.strictEqual('host' in loadServers(file).servers[1], false);
+});
+
+test('updateServer rejects an address another entry already uses, and an unknown id', (t) => {
+  const file = tmpFile(t);
+  const a = addServer(file, { name: 'A', url: '192.168.1.5', key: 'pw' }).server;
+  addServer(file, { name: 'B', url: '192.168.1.6', key: 'pw' });
+  const clash = updateServer(file, a.id, { url: '192.168.1.6' });
+  assert.strictEqual(clash.ok, false);
+  assert.match(clash.error, /already uses/i);
+  assert.strictEqual(loadServers(file).servers[1].url, 'http://192.168.1.5:25283');
+
+  assert.strictEqual(updateServer(file, 'nope', { name: 'X' }).ok, false);
+  assert.strictEqual(updateServer(file, LOCAL_ID, { name: 'X' }).ok, false);
+});
+
+test('updateServer accepts re-saving an entry at its own address', (t) => {
+  const file = tmpFile(t);
+  const { server } = addServer(file, { name: 'A', url: '192.168.1.5', key: 'pw' });
+  assert.strictEqual(updateServer(file, server.id, { url: 'http://192.168.1.5:25283' }).ok, true);
+});
+
+test('addServer stores an optional machine name', (t) => {
+  const file = tmpFile(t);
+  const { server } = addServer(file, { name: 'Desktop', url: '192.168.1.5', key: 'pw', host: 'desktop-pc' });
+  assert.strictEqual(server.host, 'desktop-pc');
+});
+
+// ── Local networks and LAN ranking ──
+
+// One ordinary /24 plus the kind of interfaces that must be ignored.
+const IFACES = {
+  Ethernet: [
+    { family: 'IPv4', internal: false, address: '192.168.1.10', netmask: '255.255.255.0', cidr: '192.168.1.10/24' },
+  ],
+  Tailscale: [
+    { family: 'IPv4', internal: false, address: '100.100.50.1', netmask: '255.255.255.255', cidr: '100.100.50.1/32' },
+  ],
+  'Loopback Pseudo-Interface 1': [
+    { family: 'IPv4', internal: true, address: '127.0.0.1', netmask: '255.0.0.0', cidr: '127.0.0.1/8' },
+  ],
+  'vEthernet (unplugged)': [
+    { family: 'IPv4', internal: false, address: '169.254.7.7', netmask: '255.255.0.0', cidr: '169.254.7.7/16' },
+  ],
+};
+const LAN = [{ address: '192.168.1.10', netmask: '255.255.255.0', prefix: 24 }];
+
+test('localSubnets keeps real LANs and drops loopback, point-to-point, and link-local', () => {
+  assert.deepStrictEqual(localSubnets(IFACES), LAN);
+  assert.deepStrictEqual(localSubnets({}), []);
+});
+
+test('isSameSubnet masks both addresses', () => {
+  assert.strictEqual(isSameSubnet('192.168.1.90', LAN[0]), true);
+  assert.strictEqual(isSameSubnet('192.168.2.90', LAN[0]), false);
+  assert.strictEqual(isSameSubnet('100.100.50.60', LAN[0]), false);
+  assert.strictEqual(isSameSubnet('nonsense', LAN[0]), false);
+});
+
+test('subnetHosts spans the subnet without the network, broadcast, or us', () => {
+  const hosts = subnetHosts(LAN[0]);
+  assert.strictEqual(hosts.length, 253);
+  assert.strictEqual(hosts[0], '192.168.1.1');
+  assert.strictEqual(hosts.at(-1), '192.168.1.254');
+  assert.strictEqual(hosts.includes('192.168.1.10'), false);
+  assert.strictEqual(hosts.includes('192.168.1.0'), false);
+  assert.strictEqual(hosts.includes('192.168.1.255'), false);
+});
+
+test('subnetHosts honours its cap', () => {
+  assert.strictEqual(subnetHosts(LAN[0], 10).length, 10);
+});
+
+test('rankAddresses puts this LAN first and a VPN overlay address last', () => {
+  const ranked = rankAddresses(['100.100.50.60', '10.4.0.9', '192.168.1.90'], LAN);
+  assert.deepStrictEqual(ranked, ['192.168.1.90', '10.4.0.9', '100.100.50.60']);
+});
+
+test('rankAddresses de-duplicates and tolerates nothing to rank', () => {
+  assert.deepStrictEqual(rankAddresses(['10.0.0.1', '10.0.0.1'], LAN), ['10.0.0.1']);
+  assert.deepStrictEqual(rankAddresses(undefined, LAN), []);
+});
+
+test('resolveHostIp prefers the LAN address over the overlay one', async () => {
+  const lookup = async () => [{ address: '100.100.50.60' }, { address: '192.168.1.90' }];
+  assert.strictEqual(await resolveHostIp('desktop-pc', lookup, LAN), '192.168.1.90');
+});
+
+// ── Network doubles ──
+
+/**
+ * A fetch double that only answers for the origins it is given: `true` is a
+ * healthy ai-tabs server, a number is that HTTP status, and anything else on
+ * the network refuses the connection.
+ */
+function fetchFor(map) {
+  return async (url) => {
+    const { origin, pathname } = new URL(url);
+    const entry = map[origin];
+    if (entry === undefined) throw new Error('connect ECONNREFUSED');
+    if (pathname === '/api/auth-status') {
+      return { ok: true, status: 200, json: async () => ({ passwordSet: true }) };
+    }
+    const status = entry === true ? 200 : entry;
+    return {
+      ok: status >= 200 && status < 300,
+      status,
+      json: async () => ({ error: 'Invalid password.' }),
+    };
+  };
+}
+
+/** A port-probe double: only these hosts are listening. */
+function probeFor(...hosts) {
+  return async (host) => hosts.includes(host);
+}
+
+test('looksLikeAiTabs identifies a server by its unauthenticated endpoint', async () => {
+  assert.strictEqual(await looksLikeAiTabs('http://192.168.1.90:25283',
+    fetchFor({ 'http://192.168.1.90:25283': true })), true);
+  assert.strictEqual(await looksLikeAiTabs('http://192.168.1.91:25283',
+    fetchFor({})), false);
+  assert.strictEqual(await looksLikeAiTabs('http://192.168.1.92:25283',
+    async () => ({ ok: true, status: 200, json: async () => ({ some: 'other service' }) })), false);
+});
+
+test('scanLanForServers fingerprints only the hosts that are listening', async () => {
+  const probed = [];
+  const found = await scanLanForServers(25283, {
+    subnets: LAN,
+    probeImpl: async (host, port) => { probed.push(host); return host === '192.168.1.90' && port === 25283; },
+    fetchImpl: fetchFor({ 'http://192.168.1.90:25283': true }),
+  });
+  assert.deepStrictEqual(found, ['http://192.168.1.90:25283']);
+  assert.strictEqual(probed.length, 253);
+  assert.strictEqual(probed.includes('192.168.1.10'), false);
+});
+
+test('scanLanForServers ignores an open port that is not ai-tabs', async () => {
+  const found = await scanLanForServers(25283, {
+    subnets: LAN,
+    probeImpl: probeFor('192.168.1.50'),
+    fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({ hello: 'nginx' }) }),
+  });
+  assert.deepStrictEqual(found, []);
+});
+
+// ── rescanServer ──
+
+test('rescanServer saves the new address when the machine moved', async (t) => {
+  const file = tmpFile(t);
+  const { server } = addServer(file, { name: 'Desktop', url: '192.168.1.5', key: 'pw', host: 'desktop-pc' });
+  const res = await rescanServer(file, server.id, {
+    subnets: LAN,
+    lookupImpl: async () => [{ address: '192.168.1.90' }],
+    fetchImpl: fetchFor({ 'http://192.168.1.90:25283': true }),
+  });
+  assert.strictEqual(res.ok, true);
+  assert.strictEqual(res.changed, true);
+  assert.strictEqual(res.url, 'http://192.168.1.90:25283');
+  assert.strictEqual(loadServers(file).servers[1].url, 'http://192.168.1.90:25283');
+});
+
+test('rescanServer tries the LAN address before the overlay one', async (t) => {
+  const file = tmpFile(t);
+  const { server } = addServer(file, { name: 'Desktop', url: '192.168.1.5', key: 'pw', host: 'desktop-pc' });
+  const asked = [];
+  const reachable = fetchFor({
+    'http://192.168.1.90:25283': true,
+    'http://100.100.50.60:25283': true,
+  });
+  const res = await rescanServer(file, server.id, {
+    subnets: LAN,
+    lookupImpl: async () => [{ address: '100.100.50.60' }, { address: '192.168.1.90' }],
+    fetchImpl: async (url, init) => { asked.push(new URL(url).origin); return reachable(url, init); },
+  });
+  assert.strictEqual(res.url, 'http://192.168.1.90:25283');
+  assert.deepStrictEqual(asked, ['http://192.168.1.90:25283']);
+});
+
+test('rescanServer reports no change when the stored address still answers', async (t) => {
+  const file = tmpFile(t);
+  const { server } = addServer(file, { name: 'Desktop', url: '192.168.1.5', key: 'pw', host: 'desktop-pc' });
+  const res = await rescanServer(file, server.id, {
+    subnets: LAN,
+    lookupImpl: async () => [{ address: '192.168.1.5' }],
+    fetchImpl: fetchFor({ 'http://192.168.1.5:25283': true }),
+  });
+  assert.strictEqual(res.ok, true);
+  assert.strictEqual(res.changed, false);
+  assert.strictEqual(res.url, 'http://192.168.1.5:25283');
+});
+
+test('rescanServer sweeps the LAN for an entry that only ever had an IP', async (t) => {
+  const file = tmpFile(t);
+  const { server } = addServer(file, { name: 'Desktop', url: '192.168.1.5', key: 'pw' });
+  const res = await rescanServer(file, server.id, {
+    subnets: LAN,
+    probeImpl: probeFor('192.168.1.90'),
+    fetchImpl: fetchFor({ 'http://192.168.1.90:25283': true }),
+  });
+  assert.strictEqual(res.ok, true);
+  assert.strictEqual(res.changed, true);
+  assert.strictEqual(loadServers(file).servers[1].url, 'http://192.168.1.90:25283');
+});
+
+test('rescanServer keeps the entry’s own port when it sweeps', async (t) => {
+  const file = tmpFile(t);
+  const { server } = addServer(file, { name: 'Desktop', url: '192.168.1.5:9000', key: 'pw' });
+  const res = await rescanServer(file, server.id, {
+    subnets: LAN,
+    probeImpl: async (host, port) => host === '192.168.1.90' && port === 9000,
+    fetchImpl: fetchFor({ 'http://192.168.1.90:9000': true }),
+  });
+  assert.strictEqual(res.url, 'http://192.168.1.90:9000');
+});
+
+test('rescanServer will not move an entry onto another entry’s address', async (t) => {
+  const file = tmpFile(t);
+  addServer(file, { name: 'VM dev', url: '192.168.1.90', key: 'pw' });
+  const { server } = addServer(file, { name: 'Desktop', url: '192.168.1.5', key: 'pw' });
+  const res = await rescanServer(file, server.id, {
+    subnets: LAN,
+    probeImpl: probeFor('192.168.1.90'),
+    fetchImpl: fetchFor({ 'http://192.168.1.90:25283': true }),
+  });
+  assert.strictEqual(res.ok, false);
+  assert.strictEqual(loadServers(file).servers[2].url, 'http://192.168.1.5:25283');
+});
+
+test('rescanServer refuses to guess between several servers that accept the password', async (t) => {
+  const file = tmpFile(t);
+  const { server } = addServer(file, { name: 'Desktop', url: '192.168.1.5', key: 'pw' });
+  const res = await rescanServer(file, server.id, {
+    subnets: LAN,
+    probeImpl: probeFor('192.168.1.90', '192.168.1.91'),
+    fetchImpl: fetchFor({
+      'http://192.168.1.90:25283': true,
+      'http://192.168.1.91:25283': true,
+    }),
+  });
+  assert.strictEqual(res.ok, false);
+  assert.deepStrictEqual(res.candidates, ['http://192.168.1.90:25283', 'http://192.168.1.91:25283']);
+  assert.match(res.error, /Found 2/);
+  assert.strictEqual(loadServers(file).servers[1].url, 'http://192.168.1.5:25283');
+});
+
+test('rescanServer skips a swept server that rejects the password', async (t) => {
+  const file = tmpFile(t);
+  const { server } = addServer(file, { name: 'Desktop', url: '192.168.1.5', key: 'pw' });
+  const res = await rescanServer(file, server.id, {
+    subnets: LAN,
+    probeImpl: probeFor('192.168.1.90'),
+    fetchImpl: fetchFor({ 'http://192.168.1.90:25283': 401 }),
+  });
+  assert.strictEqual(res.ok, false);
+  assert.match(res.error, /Could not find Desktop/);
+});
+
+test('rescanServer leaves the stored address alone when nothing answers', async (t) => {
+  const file = tmpFile(t);
+  const { server } = addServer(file, { name: 'Desktop', url: '192.168.1.5', key: 'pw', host: 'desktop-pc' });
+  const res = await rescanServer(file, server.id, {
+    subnets: LAN,
+    lookupImpl: async () => [{ address: '192.168.1.90' }],
+    probeImpl: probeFor(),
+    fetchImpl: fetchFor({}),
+  });
+  assert.strictEqual(res.ok, false);
+  assert.strictEqual(loadServers(file).servers[1].url, 'http://192.168.1.5:25283');
+});
+
+test('rescanServer reports a name that cannot be resolved when the sweep finds nothing', async (t) => {
+  const file = tmpFile(t);
+  const { server } = addServer(file, { name: 'Desktop', url: '192.168.1.5', key: 'pw', host: 'desktop-pc' });
+  const res = await rescanServer(file, server.id, {
+    subnets: LAN,
+    lookupImpl: async () => { throw new Error('getaddrinfo ENOTFOUND'); },
+    probeImpl: probeFor(),
+    fetchImpl: fetchFor({}),
+  });
+  assert.strictEqual(res.ok, false);
+  assert.match(res.error, /Could not find desktop-pc/);
+});
+
+test('rescanServer can be told not to sweep', async (t) => {
+  const file = tmpFile(t);
+  const { server } = addServer(file, { name: 'Desktop', url: '192.168.1.5', key: 'pw' });
+  let probes = 0;
+  const res = await rescanServer(file, server.id, {
+    subnets: LAN,
+    scan: false,
+    probeImpl: async () => { probes++; return true; },
+    fetchImpl: fetchFor({}),
+  });
+  assert.strictEqual(res.ok, false);
+  assert.strictEqual(probes, 0);
+});
+
+test('rescanServer falls back to a hostname stored in the url itself', async (t) => {
+  const file = tmpFile(t);
+  const { server } = addServer(file, { name: 'Desktop', url: 'desktop-pc', key: 'pw' });
+  const res = await rescanServer(file, server.id, {
+    subnets: LAN,
+    lookupImpl: async (name) => {
+      assert.strictEqual(name, 'desktop-pc');
+      return [{ address: '192.168.1.90' }];
+    },
+    fetchImpl: fetchFor({ 'http://192.168.1.90:25283': true }),
+  });
+  assert.strictEqual(res.ok, true);
+  assert.strictEqual(res.url, 'http://192.168.1.90:25283');
+});
+
+test('rescanServer refuses the local entry and an unknown id', async (t) => {
+  const file = tmpFile(t);
+  assert.strictEqual((await rescanServer(file, LOCAL_ID, { scan: false })).ok, false);
+  assert.strictEqual((await rescanServer(file, 'nope', { scan: false })).ok, false);
 });

@@ -5,52 +5,187 @@
   <title>ai-tabs — choose a server</title>
   <style>
     :root { --bg:#1e1e2e; --fg:#cdd6f4; --muted:#9399b2; --border:#313244;
-            --accent:#89b4fa; --danger:#f38ba8; --input-bg:#181825; }
+            --accent:#89b4fa; --danger:#f38ba8; --ok:#a6e3a1; --input-bg:#181825; }
     * { box-sizing: border-box; }
     body { margin:0; padding:16px; background:var(--bg); color:var(--fg);
            font:13px system-ui, sans-serif; user-select:none; }
-    h1 { font-size:13px; font-weight:600; margin:0 0 12px; color:var(--muted); }
+    h1 { font-size:13px; font-weight:600; margin:0 0 12px; color:var(--muted);
+         display:flex; align-items:center; gap:8px; }
+    h1 .spacer { flex:1; }
     ul { list-style:none; margin:0 0 12px; padding:0; }
-    li { display:flex; align-items:center; gap:8px; padding:9px 10px; margin-bottom:6px;
-         border:1px solid var(--border); border-radius:6px; cursor:pointer; }
+    li { display:flex; align-items:center; gap:4px; padding:9px 10px; margin-bottom:6px;
+         border:1px solid var(--border); border-radius:6px; }
     li:hover { border-color:var(--accent); }
-    .name { flex:1; }
-    .url { font-size:11px; color:var(--muted); }
-    .remove { border:none; background:none; color:var(--muted); cursor:pointer;
-              font-size:15px; line-height:1; padding:2px 5px; }
-    .remove:hover { color:var(--danger); }
+    .name { flex:1; cursor:pointer; min-width:0; }
+    .url { font-size:11px; color:var(--muted); overflow:hidden; text-overflow:ellipsis; }
+    .icon { border:none; background:none; color:var(--muted); cursor:pointer;
+            font-size:14px; line-height:1; padding:3px 5px; border-radius:4px; }
+    .icon:hover { color:var(--fg); background:var(--input-bg); }
+    .icon.remove:hover { color:var(--danger); }
+    .icon:disabled { opacity:.45; cursor:default; }
     button.action { width:100%; padding:8px; border-radius:6px; border:1px solid var(--border);
                     background:var(--input-bg); color:var(--fg); cursor:pointer; }
     button.action:hover { border-color:var(--accent); }
-    #notice { color:var(--danger); font-size:12px; margin-bottom:10px; min-height:15px; }
-    form { display:none; flex-direction:column; gap:7px; margin-top:10px; }
+    button.action:disabled { opacity:.6; cursor:default; }
+    button.link { border:none; background:none; color:var(--muted); font-size:12px;
+                  cursor:pointer; padding:0; }
+    button.link:hover { color:var(--accent); }
+    #notice { font-size:12px; margin-bottom:10px; min-height:15px; color:var(--danger); }
+    #notice.info { color:var(--muted); }
+    #notice.ok { color:var(--ok); }
+    #choices { display:flex; flex-wrap:wrap; gap:6px; margin:-4px 0 10px; }
+    #choices button { font-size:11px; padding:4px 8px; border-radius:5px; cursor:pointer;
+                      border:1px solid var(--border); background:var(--input-bg); color:var(--fg); }
+    #choices button:hover { border-color:var(--accent); }
+    form { display:none; flex-direction:column; gap:7px; margin-top:10px;
+           border:1px solid var(--border); border-radius:6px; padding:10px; }
+    form.open { display:flex; }
+    form h2 { font-size:12px; font-weight:600; margin:0; color:var(--muted); }
     input { padding:7px; border-radius:5px; border:1px solid var(--border);
             background:var(--input-bg); color:var(--fg); font-size:12px;
             user-select:text; }
+    .hint { font-size:11px; color:var(--muted); margin-top:-3px; }
+    .row { display:flex; gap:7px; }
+    .row > * { flex:1; }
   </style>
 </head>
 <body>
-  <h1>Open ai-tabs on…</h1>
+  <h1>
+    <span>Open ai-tabs on…</span>
+    <span class="spacer"></span>
+    <button class="link" id="rescan-all" title="Find every saved server again on this network">⟳ Rescan addresses</button>
+  </h1>
   <div id="notice"></div>
+  <div id="choices"></div>
   <ul id="list"></ul>
   <button class="action" id="add-btn">+ Add server</button>
-  <form id="add-form">
+
+  <form id="server-form">
+    <h2 id="f-title">Add server</h2>
     <input id="f-name" placeholder="Name (e.g. VM dev)" autocomplete="off">
-    <input id="f-url" placeholder="Address (e.g. 192.168.1.5)" autocomplete="off">
+    <input id="f-url" placeholder="Address (e.g. 192.168.1.5 or desktop-pc)" autocomplete="off">
+    <input id="f-host" placeholder="Machine name for rescans (optional)" autocomplete="off">
+    <div class="hint" id="f-host-hint">Optional — a saved name is tried first when an address changes.</div>
     <input id="f-key" type="password" placeholder="Remote-access password">
-    <button class="action" type="submit" id="f-save">Check and add</button>
+    <div class="row">
+      <button class="action" type="submit" id="f-save">Check and save</button>
+      <button class="action" type="button" id="f-cancel">Cancel</button>
+    </div>
+    <button class="link" type="button" id="f-force" hidden>Save without checking</button>
   </form>
 
   <script>
     const api = window.electronRemote;
     const $list = document.getElementById('list');
     const $notice = document.getElementById('notice');
-    const $form = document.getElementById('add-form');
+    const $choices = document.getElementById('choices');
+    const $form = document.getElementById('server-form');
+    const $title = document.getElementById('f-title');
+    const $name = document.getElementById('f-name');
+    const $url = document.getElementById('f-url');
+    const $host = document.getElementById('f-host');
+    const $key = document.getElementById('f-key');
+    const $save = document.getElementById('f-save');
+    const $force = document.getElementById('f-force');
+
+    // null = the form is adding; a string id = the form is editing that entry.
+    let editingId = null;
 
     const params = new URLSearchParams(location.search);
     if (params.get('notice')) $notice.textContent = params.get('notice');
 
-    function note(text) { $notice.textContent = text || ''; }
+    function note(text, kind = '') {
+      $notice.className = kind;
+      $notice.textContent = text || '';
+    }
+
+    /** Addresses a rescan found but would not pick between. */
+    function offerChoices(addresses, onPick) {
+      $choices.innerHTML = '';
+      for (const address of addresses || []) {
+        const b = document.createElement('button');
+        b.textContent = `Use ${address}`;
+        b.addEventListener('click', () => onPick(address));
+        $choices.appendChild(b);
+      }
+    }
+
+    function clearChoices() { $choices.innerHTML = ''; }
+
+    function closeForm() {
+      editingId = null;
+      $form.classList.remove('open');
+      $form.reset();
+      $force.hidden = true;
+    }
+
+    function openAddForm() {
+      editingId = null;
+      $title.textContent = 'Add server';
+      $name.value = ''; $url.value = ''; $host.value = ''; $key.value = '';
+      $key.placeholder = 'Remote-access password';
+      $force.hidden = true;
+      $form.classList.add('open');
+      $name.focus();
+    }
+
+    function openEditForm(server) {
+      editingId = server.id;
+      $title.textContent = `Edit ${server.name}`;
+      $name.value = server.name || '';
+      $url.value = server.url || '';
+      $host.value = server.host || '';
+      $key.value = '';
+      $key.placeholder = 'Password (leave blank to keep current)';
+      $force.hidden = true;
+      $form.classList.add('open');
+      $url.focus();
+      $url.select();
+    }
+
+    function iconButton(glyph, title, cls, onClick) {
+      const b = document.createElement('button');
+      b.className = `icon ${cls}`;
+      b.textContent = glyph;
+      b.title = title;
+      b.addEventListener('click', (e) => { e.stopPropagation(); onClick(b); });
+      return b;
+    }
+
+    async function rescan(id, buttonToDisable) {
+      clearChoices();
+      note('Searching this network for the server…', 'info');
+      if (buttonToDisable) buttonToDisable.disabled = true;
+      const res = await api.pickerRescan(id);
+      if (buttonToDisable) buttonToDisable.disabled = false;
+
+      const results = res.results || [];
+      const moved = results.filter((r) => r.ok && r.changed);
+      const same = results.filter((r) => r.ok && !r.changed);
+      const failed = results.filter((r) => !r.ok);
+
+      if (moved.length) {
+        note(moved.map((r) => `${r.name} → ${r.url}`).join(', '), 'ok');
+      } else if (!failed.length && same.length) {
+        note(same.length === 1 ? 'Address is still current.' : 'All addresses are still current.', 'info');
+      } else {
+        note(failed.map((r) => `${r.name}: ${r.error}`).join('  ·  ') || res.error || 'Rescan failed.');
+      }
+
+      // Several servers answered for one entry: let the user say which.
+      const ambiguous = failed.find((r) => r.candidates && r.candidates.length);
+      if (ambiguous) {
+        offerChoices(ambiguous.candidates, async (address) => {
+          clearChoices();
+          note('Saving…', 'info');
+          const saved = await api.pickerUpdate({ id: ambiguous.id, url: address });
+          note(saved.ok ? `${ambiguous.name} → ${address}` : (saved.error || 'Could not save.'),
+            saved.ok ? 'ok' : '');
+          render();
+        });
+      }
+      render();
+    }
 
     async function render() {
       const { servers } = await api.pickerList();
@@ -63,52 +198,70 @@
         if (s.url) {
           const u = document.createElement('div');
           u.className = 'url';
-          u.textContent = s.url;
+          u.textContent = s.host ? `${s.url} · ${s.host}` : s.url;
           label.appendChild(u);
         }
-        li.appendChild(label);
-        if (s.url) {
-          const x = document.createElement('button');
-          x.className = 'remove';
-          x.textContent = '×';
-          x.title = 'Remove from list';
-          x.addEventListener('click', async (e) => {
-            e.stopPropagation();
-            await api.pickerRemove(s.id);
-            render();
-          });
-          li.appendChild(x);
-        }
-        li.addEventListener('click', async () => {
+        label.addEventListener('click', async () => {
           note('');
           const res = await api.pickerLaunch(s.id);
           if (!res.ok) note(res.error || 'Could not launch.');
         });
+        li.appendChild(label);
+
+        if (s.url) {
+          li.appendChild(iconButton('⟳', s.host
+            ? `Find ${s.host} again and update its address`
+            : 'Search this network for this server and update its address',
+            'rescan', (b) => rescan(s.id, b)));
+          li.appendChild(iconButton('✎', 'Edit name, address, or password',
+            'edit', () => { note(''); openEditForm(s); }));
+          li.appendChild(iconButton('×', 'Remove from list', 'remove', async () => {
+            if (editingId === s.id) closeForm();
+            await api.pickerRemove(s.id);
+            render();
+          }));
+        }
         $list.appendChild(li);
       }
     }
 
     document.getElementById('add-btn').addEventListener('click', () => {
-      $form.style.display = $form.style.display === 'flex' ? 'none' : 'flex';
+      if ($form.classList.contains('open') && editingId === null) closeForm();
+      else openAddForm();
     });
 
-    $form.addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const $save = document.getElementById('f-save');
+    document.getElementById('f-cancel').addEventListener('click', () => { note(''); closeForm(); });
+
+    document.getElementById('rescan-all').addEventListener('click', (e) => rescan(null, e.currentTarget));
+
+    async function submitForm(skipCheck) {
+      const wasEditing = editingId;
       $save.disabled = true;
-      note('Checking…');
-      const res = await api.pickerAdd({
-        name: document.getElementById('f-name').value,
-        url: document.getElementById('f-url').value,
-        key: document.getElementById('f-key').value,
-      });
+      $force.disabled = true;
+      note(skipCheck ? 'Saving…' : 'Checking…', 'info');
+      const entry = {
+        name: $name.value, url: $url.value, host: $host.value, key: $key.value, skipCheck,
+      };
+      const res = wasEditing
+        ? await api.pickerUpdate({ id: wasEditing, ...entry })
+        : await api.pickerAdd(entry);
       $save.disabled = false;
-      if (!res.ok) { note(res.error || 'Could not add that server.'); return; }
-      note('');
-      $form.reset();
-      $form.style.display = 'none';
+      $force.disabled = false;
+
+      if (!res.ok) {
+        note(res.error || 'Could not save that server.');
+        // The usual reason to be here is that the server is switched off, so
+        // offer to save the entry as typed rather than making it un-editable.
+        $force.hidden = !res.canSkipCheck;
+        return;
+      }
+      note(skipCheck ? `Saved without checking — ${res.url}` : 'Saved.', 'ok');
+      closeForm();
       render();
-    });
+    }
+
+    $form.addEventListener('submit', (e) => { e.preventDefault(); submitForm(false); });
+    $force.addEventListener('click', () => submitForm(true));
 
     render();
   </script>

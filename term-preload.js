@@ -36,6 +36,8 @@ contextBridge.exposeInMainWorld('electronRemote', {
   pickerList: () => ipcRenderer.invoke('picker-list'),
   pickerLaunch: (id) => ipcRenderer.invoke('picker-launch', id),
   pickerAdd: (entry) => ipcRenderer.invoke('picker-add', entry),
+  pickerUpdate: (entry) => ipcRenderer.invoke('picker-update', entry),
+  pickerRescan: (id = null) => ipcRenderer.invoke('picker-rescan', id),
   pickerRemove: (id) => ipcRenderer.invoke('picker-remove', id),
   pickerOpen: () => ipcRenderer.invoke('picker-open'),
 });

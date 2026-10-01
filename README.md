@@ -145,6 +145,37 @@ picker. Saved servers live in `servers.json` in the client's Electron user-data
 directory (`%APPDATA%\ai-tabs` on Windows, `~/Library/Application Support/ai-tabs`
 on macOS, `~/.config/ai-tabs` on Linux), so they survive reinstalls.
 
+The address field also takes a machine name (e.g. `my-desktop`); it is resolved
+to an IP to connect, because of the Host-header rule below, and the name is
+kept on the entry so the server can be found again when that IP changes.
+
+**When a server's IP changes:** each row in the picker has **✎** to edit it
+(name, address, or password — leave the password blank to keep the stored one)
+and **⟳** to re-find it. **⟳ Rescan addresses** in the header does every saved
+server at once. A rescan tries three things, cheapest first:
+
+1. The entry's saved **machine name**, through the OS resolver — hosts file,
+   mDNS, LLMNR/NetBIOS, or a VPN's resolver. Addresses on one of *this*
+   machine's own subnets are tried before any other, so a name that also
+   resolves to a Tailscale address still connects over the LAN.
+2. The address already saved — this is what reports "still current".
+3. A sweep of this machine's own subnets for the entry's port. A plain TCP
+   connect narrows it to the hosts that are listening, those are identified as
+   ai-tabs through the unauthenticated `/api/auth-status`, and only then is the
+   stored password tried. This is what finds a server that was saved as a bare
+   IP, with no name to resolve.
+
+The new address is saved only once it answers with the stored password, so a
+rescan that reaches nothing leaves the entry exactly as it was. If the sweep
+turns up more than one ai-tabs server that accepts the password, the picker
+lists them instead of guessing. An address already used by another entry is
+never taken.
+
+**Saving while the server is off:** a save normally has to pass a health check
+first, but the usual reason to edit an entry is that it is unreachable — so a
+failed check offers **Save without checking**, which stores the entry exactly
+as typed.
+
 ### Control handoff
 
 The server's own GUI no longer has to be closed. When a remote client connects,

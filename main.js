@@ -1709,9 +1709,11 @@ function openPicker(notice = null) {
   if (pickerWin && !pickerWin.isDestroyed()) { pickerWin.focus(); return; }
   const themeData = getThemeData();
   pickerWin = new BrowserWindow({
-    width: 380,
-    height: 460,
-    resizable: false,
+    width: 400,
+    height: 540,
+    minWidth: 340,
+    minHeight: 320,
+    resizable: true,
     title: 'ai-tabs',
     icon: APP_ICON,
     backgroundColor: themeData.ui.deepBg || themeData.ui.tabBarBg,
@@ -1747,7 +1749,9 @@ function spawnServerWindow(id) {
 
 // Keys never cross into the renderer — the picker only needs to display names.
 ipcMain.handle('picker-list', () => ({
-  servers: servers.loadServers(SERVERS_FILE).servers.map(s => ({ id: s.id, name: s.name, url: s.url })),
+  servers: servers.loadServers(SERVERS_FILE).servers.map(s => ({
+    id: s.id, name: s.name, url: s.url, host: s.host ?? null,
+  })),
 }));
 
 ipcMain.handle('picker-launch', (e, id) => new Promise((resolve) => {
@@ -1778,19 +1782,93 @@ ipcMain.handle('picker-launch', (e, id) => new Promise((resolve) => {
   });
 }));
 
-ipcMain.handle('picker-add', async (e, { name, url, key }) => {
-  if (!isTrustedSender(e)) return { ok: false, error: 'untrusted sender' };
-  let normalized;
+/**
+ * Turn what was typed into an address to connect to plus a machine name to
+ * remember. A name typed in the address field is resolved to an IP, because
+ * the server rejects unknown Host headers — but the name is kept so the entry
+ * can be re-found later when that IP changes.
+ *
+ * `lenient` keeps an unresolvable name verbatim instead of refusing it; see
+ * `skipCheck` below.
+ */
+async function resolvePickerAddress(url, host, { lenient = false } = {}) {
+  const parsed = servers.parseAddress(url, servers.DEFAULT_PORT);
+  const name = String(host || '').trim() || (parsed.isIp ? '' : parsed.hostname);
+  if (parsed.isIp) return { url: parsed.origin, host: name };
+
   try {
-    normalized = servers.normalizeUrl(url, servers.DEFAULT_PORT);
+    const address = await servers.resolveHostIp(parsed.hostname);
+    return { url: servers.withHostname(parsed.origin, address), host: name };
   } catch (err) {
-    return { ok: false, error: err.message };
+    if (lenient) return { url: parsed.origin, host: name };
+    throw new Error(`Could not find ${parsed.hostname} on the network: ${err.message}`);
   }
-  const check = await servers.validateServer(normalized, key);
-  if (!check.ok) return check;
-  const result = servers.addServer(SERVERS_FILE, { name, url: normalized, key });
+}
+
+/**
+ * `skipCheck` saves an entry the server could not confirm. It exists because
+ * the usual reason to add or edit an entry is that the server is unreachable —
+ * a validating-only save would make the address un-fixable while it is down.
+ * The failed check is still reported first; skipping it takes a second click.
+ */
+ipcMain.handle('picker-add', async (e, { name, url, key, host, skipCheck }) => {
+  if (!isTrustedSender(e)) return { ok: false, error: 'untrusted sender' };
+  let target;
+  try {
+    target = await resolvePickerAddress(url, host, { lenient: !!skipCheck });
+  } catch (err) {
+    return { ok: false, error: err.message, canSkipCheck: true };
+  }
+  if (!skipCheck) {
+    const check = await servers.validateServer(target.url, key);
+    if (!check.ok) return { ...check, canSkipCheck: true };
+  }
+  const result = servers.addServer(SERVERS_FILE, { name, url: target.url, key, host: target.host });
   // Never return the key to the renderer, even though it just typed it.
-  return result.ok ? { ok: true } : result;
+  return result.ok ? { ok: true, url: target.url } : result;
+});
+
+/**
+ * Save an edit. An empty key means "keep the stored one", so the password
+ * never has to leave the main process to survive an address change.
+ */
+ipcMain.handle('picker-update', async (e, { id, name, url, key, host, skipCheck }) => {
+  if (!isTrustedSender(e)) return { ok: false, error: 'untrusted sender' };
+  const existing = servers.loadServers(SERVERS_FILE).servers.find((s) => s.id === id);
+  if (!existing || !existing.url) return { ok: false, error: 'That server is no longer in the list.' };
+
+  let target;
+  try {
+    target = await resolvePickerAddress(url, host, { lenient: !!skipCheck });
+  } catch (err) {
+    return { ok: false, error: err.message, canSkipCheck: true };
+  }
+
+  if (!skipCheck) {
+    const check = await servers.validateServer(target.url, (typeof key === 'string' && key) ? key : existing.key);
+    if (!check.ok) return { ...check, canSkipCheck: true };
+  }
+
+  // A caller that said nothing about the machine name (changing only the
+  // address) must not clear the saved one — only an explicitly empty field does.
+  const hostPatch = (host === undefined && !target.host) ? undefined : target.host;
+  const result = servers.updateServer(SERVERS_FILE, id, { name, url: target.url, key, host: hostPatch });
+  return result.ok ? { ok: true, url: target.url } : result;
+});
+
+/** Re-find one entry on this network; `null` id rescans every entry. */
+ipcMain.handle('picker-rescan', async (e, id) => {
+  if (!isTrustedSender(e)) return { ok: false, error: 'untrusted sender' };
+  const list = servers.loadServers(SERVERS_FILE).servers.filter((s) => s.url);
+  const targets = id ? list.filter((s) => s.id === id) : list;
+  if (!targets.length) return { ok: false, error: 'No remote servers to rescan.' };
+
+  const results = [];
+  for (const s of targets) {
+    const res = await servers.rescanServer(SERVERS_FILE, s.id);
+    results.push({ id: s.id, name: s.name, ...res });
+  }
+  return { ok: results.some((r) => r.ok), results };
 });
 
 ipcMain.handle('picker-remove', (e, id) => ({ ok: isTrustedSender(e) && servers.removeServer(SERVERS_FILE, id) }));
