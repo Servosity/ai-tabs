@@ -28,6 +28,19 @@ if (launchTarget && launchTarget.url) {
 }
 const isRemoteMode = !!(remoteServerUrl && remoteServerKey);
 
+// Window size/position memory, one entry per launch target (lib/window-state).
+const windowState = require('./lib/window-state');
+const WINDOW_STATE_FILE = path.join(app.getPath('userData'), 'window-state.json');
+const WINDOW_STATE_KEY = (launchTarget && launchTarget.id) || 'local';
+
+/** Last saved bounds for this launch target, fitted to the displays attached now. */
+function savedWindowBounds() {
+  return windowState.fitToDisplays(
+    windowState.load(WINDOW_STATE_FILE, WINDOW_STATE_KEY),
+    screen.getAllDisplays().map((d) => d.workArea),
+  );
+}
+
 let BASE_URL = isRemoteMode ? remoteServerUrl : 'http://localhost:25283';
 
 // Same-origin test, never a string prefix: 'http://localhost:25283@evil.com/'
@@ -741,6 +754,9 @@ function createWindow(opts = {}) {
   win.contentView.addChildView(tabBarView);
   tabBarView.webContents.loadFile(path.join(__dirname, 'tab-bar.html'));
 
+  windowState.track(win, WINDOW_STATE_FILE, WINDOW_STATE_KEY);
+  if (opts.maximized) win.once('show', () => { if (!win.isDestroyed()) win.maximize(); });
+
   const state = { win, tabBarView, tabs: [], activeTabId: null, tabBarExpanded: false, _raisedTabId: null, lockView: null };
   const winId = win.id; // capture before destruction
   windows.set(winId, state);
@@ -1079,9 +1095,11 @@ function detachTab(state, tabId, screenX, screenY) {
   foreignDragTarget = null;
 
   // Otherwise create new window at the drop position
+  // A tab dragged out keeps the remembered window size, placed at the drop.
+  const saved = savedWindowBounds();
   const newState = createWindow({
-    width: 1000,
-    height: 700,
+    width: saved ? saved.width : 1000,
+    height: saved ? saved.height : 700,
     x: screenX - 500,
     y: screenY - 20,
   });
@@ -1912,7 +1930,7 @@ app.whenReady().then(async () => {
   }
 
   createGhostWindow();
-  const state = createWindow({ show: false });
+  const state = createWindow({ ...savedWindowBounds(), show: false });
   const projectsRoot = process.env.PROJECTS_ROOT || path.join(require('os').homedir(), 'Documents', 'Projects');
   createTab(state, BASE_URL, path.basename(projectsRoot), true, false, false, true);
 
