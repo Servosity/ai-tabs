@@ -8,7 +8,6 @@ const { extractSnippets, SnippetStore, KIND_CODE, KIND_QUOTE } = require('../lib
 const { TranscriptScanner } = require('../lib/media/transcript-scan');
 const { MediaManager } = require('../lib/media/manager');
 const { MediaStore } = require('../lib/media/store');
-const { snippetLabel, lineCount } = require('../public/snippet-list');
 
 const REPLY = [
   'Here is the fix:',
@@ -90,12 +89,4 @@ test('the scanner hands assistant snippets to onSnippet and skips user text', ()
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
-});
-
-test('copy boxes are labelled by language or kind', () => {
-  assert.equal(snippetLabel({ kind: 'code', lang: 'ps1' }), 'ps1');
-  assert.equal(snippetLabel({ kind: 'code', lang: null }), 'code');
-  assert.equal(snippetLabel({ kind: 'quote' }), 'quote');
-  assert.equal(lineCount('a'), '1 line');
-  assert.equal(lineCount('a\nb'), '2 lines');
 });

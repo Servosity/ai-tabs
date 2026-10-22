@@ -19,7 +19,7 @@
   <link rel="icon" href="/icon.svg" type="image/svg+xml">
   <link rel="manifest" href="/manifest.json">
   <link rel="stylesheet" href="/xterm/css/xterm.css">
-  <link rel="stylesheet" href="/media-panel.css">
+  <link rel="stylesheet" href="/inline-marks.css">
   <style>
     :root {
       --bg: #1a1a2e;          --fg: #e0e0e0;
@@ -39,8 +39,7 @@
     .xterm { height: 100%; }
     .xterm-viewport { overflow-y: auto !important; }
     /* Theme the terminal scrollbar — the default white track reads as a
-       rendering glitch against dark themes, especially since the media panel
-       moved it off the window edge into the middle of the page. */
+       rendering glitch against dark themes. */
     .xterm-viewport::-webkit-scrollbar { width: 10px; }
     .xterm-viewport::-webkit-scrollbar-track { background: transparent; }
     .xterm-viewport::-webkit-scrollbar-thumb {
@@ -491,8 +490,8 @@
   <script src="/xterm/lib/addon-search/addon-search.js"></script>
   <script src="/term-search.js"></script>
   <script src="/sl-rate-limits.js"></script>
-  <script src="/snippet-list.js"></script>
-  <script src="/media-panel.js"></script>
+  <script src="/inline-match.js"></script>
+  <script src="/inline-marks.js"></script>
   <script>
     // Register service worker (required for PWA installability)
     if ('serviceWorker' in navigator) {
@@ -1161,15 +1160,14 @@
         }
         slApplyTheme(preset);
 
-        // ── Media panel — images the agent read or captured (public/media-panel.js) ──
-        // Fed by {type:'media'} pushes; shrinks #terminal on the right the same
-        // way the statusline takes the bottom. The badge count reaches the tab
-        // bar through term-preload's electronMedia bridge (absent in a browser).
+        // ── Inline marks — copy boxes over the agent's code blocks and quotes,
+        // image thumbnails on the line they came from (public/inline-marks.js).
+        // Fed by {type:'snippet'} and {type:'media'} pushes.
         const SL_HEIGHT_PX = 26;
-        const mediaPanel = window.MediaPanel ? window.MediaPanel.create({
-          container,
+        const inlineMarks = window.InlineMarks ? window.InlineMarks.create({
+          term,
+          copy: (text) => writeClipboard(text).then(() => true, () => false),
           focusTerminal: () => term.focus(),
-          badge: (n) => { if (window.electronMedia && window.electronMedia.badge) window.electronMedia.badge(n); },
         }) : null;
 
         function slRender() {
@@ -1177,7 +1175,6 @@
           slEl.classList.toggle('visible', !!show);
           // Terminal yields the bar's height; ResizeObserver refits xterm.
           container.style.bottom = show ? `${SL_HEIGHT_PX}px` : '0';
-          if (mediaPanel) mediaPanel.setBottom(show ? SL_HEIGHT_PX : 0);
           if (!show) return;
           const s = slStats, p = s.provider;
           const segs = [];
@@ -1283,13 +1280,12 @@
                 sessionId = msg.sessionId;
                 window._sessionId = sessionId;
                 reconnectAttempt = 0;
-                if (mediaPanel) mediaPanel.attach(sessionId);
+                if (inlineMarks) inlineMarks.attach(sessionId);
                 break;
               case 'attached':
                 sessionId = msg.sessionId;
                 window._sessionId = sessionId;
                 reconnectAttempt = 0;
-                if (mediaPanel) mediaPanel.attach(sessionId);
                 term.reset();
                 if (msg.scrollback) {
                   term.write(msg.scrollback.replace(/\n/g, '\r\n'));
@@ -1301,6 +1297,8 @@
                 if (!msg.altScreen) {
                   term.write('\r\n\x1b[32m[Reconnected]\x1b[0m\r\n');
                 }
+                // Marks are found by scanning the buffer, so after the replay.
+                if (inlineMarks) term.write('', () => inlineMarks.attach(msg.sessionId));
                 break;
               case 'data':
                 term.write(msg.data);
@@ -1319,13 +1317,13 @@
                 slRender();
                 break;
               case 'media':
-                if (mediaPanel && msg.sessionId === sessionId) mediaPanel.push(msg.item);
+                if (inlineMarks && msg.sessionId === sessionId) inlineMarks.pushImage(msg.item);
                 break;
               case 'snippet':
-                if (mediaPanel && msg.sessionId === sessionId) mediaPanel.pushSnippet(msg.item);
+                if (inlineMarks && msg.sessionId === sessionId) inlineMarks.pushSnippet(msg.item);
                 break;
               case 'media-removed':
-                if (mediaPanel && msg.sessionId === sessionId) mediaPanel.remove(msg.id);
+                if (inlineMarks && msg.sessionId === sessionId) inlineMarks.removeImage(msg.id);
                 break;
               case 'hotkeys-updated':
                 loadHotkeys();

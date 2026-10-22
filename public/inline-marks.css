@@ -1,0 +1,71 @@
+/* Inline marks (public/inline-marks.js): copy boxes over the agent's code
+   blocks and quotes, image thumbnails at the end of the line they came from.
+   Both are xterm decorations, so they scroll with the text. */
+
+.xterm-decoration.im-box {
+  pointer-events: auto; cursor: copy; box-sizing: border-box;
+  border: 1px solid transparent; border-radius: 4px;
+  background: transparent;
+}
+.xterm-decoration.im-box:hover {
+  border-color: var(--accent, #9d7ee0);
+  background: color-mix(in srgb, var(--accent, #9d7ee0) 8%, transparent);
+}
+.xterm-decoration.im-box.im-copied {
+  border-color: var(--success, #4caf50);
+  background: color-mix(in srgb, var(--success, #4caf50) 10%, transparent);
+}
+/* A faint edge so the box is findable before you hover it. */
+.xterm-decoration.im-box::before {
+  content: ''; position: absolute; left: 0; top: 2px; bottom: 2px; width: 2px;
+  border-radius: 1px; background: var(--accent, #9d7ee0); opacity: 0.45;
+}
+.im-tag {
+  /* Bottom corner: a block's last row is usually its shortest. */
+  position: absolute; bottom: 0; right: 4px; padding: 0 6px; border-radius: 4px 4px 0 0;
+  font: 600 10px/16px -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  background: var(--accent, #9d7ee0); color: #fff; opacity: 0; pointer-events: none;
+}
+.im-box:hover .im-tag, .im-box.im-copied .im-tag { opacity: 1; }
+.im-box.im-copied .im-tag { background: var(--success, #4caf50); }
+
+.xterm-decoration.im-chip {
+  pointer-events: auto; display: flex; gap: 3px; align-items: stretch; justify-content: flex-end;
+  padding: 1px 0;
+}
+.im-thumb {
+  height: 100%; max-width: 100%; aspect-ratio: auto; object-fit: cover; min-width: 0; flex: 0 1 auto;
+  border-radius: 3px; cursor: zoom-in; border: 1px solid var(--sl-border, #2a3a5c);
+  background: var(--sl-bar-bg, #1c1c2e);
+}
+.im-thumb:hover { border-color: var(--accent, #9d7ee0); }
+.im-more {
+  align-self: center; font: 600 10px system-ui, sans-serif; color: var(--sl-muted, #8a8fa0);
+}
+
+.im-preview {
+  position: fixed; z-index: 100; pointer-events: none; padding: 3px; border-radius: 6px;
+  background: var(--header-bg, #16213e); border: 1px solid var(--border, #2a3a5c);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.55);
+}
+.im-preview[hidden] { display: none; }
+.im-preview img { display: block; max-width: 360px; max-height: 360px; object-fit: contain; border-radius: 4px; }
+
+.im-lightbox {
+  position: fixed; inset: 0; z-index: 110; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 10px; padding: 28px 40px 12px;
+  background: rgba(0, 0, 0, 0.88); outline: none;
+}
+.im-lightbox[hidden] { display: none; }
+.im-lightbox > img { max-width: 100%; min-height: 0; flex: 1; object-fit: contain; cursor: zoom-out; }
+.im-lb-bar {
+  display: flex; align-items: center; gap: 12px; max-width: 100%;
+  color: #ddd; font: 12px -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+}
+.im-lb-meta { color: #999; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.im-lb-bar button {
+  background: none; border: 1px solid #555; color: #ddd; border-radius: 4px;
+  padding: 3px 10px; cursor: pointer; font: inherit;
+}
+.im-lb-bar button:hover { border-color: var(--accent, #9d7ee0); color: #fff; }
+.im-lb-bar button[hidden] { display: none; }

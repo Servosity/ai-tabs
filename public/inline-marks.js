@@ -1,0 +1,328 @@
+/**
+ * Inline marks — click-to-copy boxes over the code blocks and quotes the
+ * agent wrote, and image thumbnails on the line where each image happened,
+ * drawn in the terminal itself as xterm decorations so they scroll with the
+ * text. Positions come from public/inline-match.js.
+ *
+ * Usage (index.html, terminal mode):
+ *   const marks = InlineMarks.create({ term, copy, focusTerminal });
+ *   marks.attach(sessionId)     on 'created' / 'attached' (after the scrollback write)
+ *   marks.pushSnippet(item)     on {type:'snippet'}
+ *   marks.pushImage(item)       on {type:'media'}
+ *   marks.removeImage(id)       on {type:'media-removed'}
+ */
+(function (global) {
+  'use strict';
+
+  const SCAN_DEBOUNCE_MS = 400;
+  const PENDING_TTL_MS = 60 * 1000;
+  const COPIED_MS = 1200;
+  const THUMB_CELLS = 4;
+  const MAX_THUMBS = 4;
+  const TALL_ROWS = 3;
+  const PREVIEW_MAX_PX = 360;
+  const KEY_ESCAPE = 'Escape';
+
+  function el(tag, className, text) {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text != null) node.textContent = text;
+    return node;
+  }
+
+  function create(opts) {
+    const term = opts.term;
+    const copy = opts.copy;
+    const focusTerminal = opts.focusTerminal || (() => {});
+    const fetchFn = opts.fetch || ((url, init) => global.fetch(url, init));
+    const match = global.InlineMatch;
+
+    let sessionId = null;
+    let snippets = [];           // newest first
+    let images = [];             // newest first
+    const boxes = new Map();     // snippet id → [{marker, decoration}]
+    const imageRow = new Map();  // image id → marker (live anchor or placed)
+    const chips = new Map();     // marker line → {marker, decoration, ids}
+    const pending = new Map();   // snippet id → first seen (ms), until drawn
+    const blobUrls = new Map();
+    let scanTimer = null;
+
+    // ── Buffer access ──
+    function bufferRows() {
+      const b = term.buffer.normal;
+      const rows = new Array(b.length);
+      for (let i = 0; i < b.length; i++) {
+        const line = b.getLine(i);
+        rows[i] = line ? line.translateToString(true) : '';
+      }
+      return rows;
+    }
+    function markerAt(row) {
+      const b = term.buffer.normal;
+      return term.registerMarker(row - (b.baseY + b.cursorY));
+    }
+    const live = (m) => m && !m.isDisposed && m.line >= 0;
+
+    // ── Copy boxes ──
+    function drawBox(item, range) {
+      const marker = markerAt(range.start);
+      if (!marker) return null;
+      const decoration = term.registerDecoration({
+        marker, x: 0, width: term.cols, height: range.end - range.start + 1, layer: 'top',
+      });
+      if (!decoration) { marker.dispose(); return null; }
+      let timer = null;
+      decoration.onRender((node) => {
+        if (node.dataset.snippet) return;
+        node.dataset.snippet = item.id;
+        node.classList.add('im-box', item.kind === 'quote' ? 'im-quote' : 'im-code');
+        node.title = 'Click to copy';
+        const tag = el('span', 'im-tag', 'copy');
+        node.append(tag);
+        node.addEventListener('mousedown', (e) => e.stopPropagation());
+        node.addEventListener('click', async (e) => {
+          e.stopPropagation();
+          const ok = await copy(item.text);
+          tag.textContent = ok ? 'copied' : 'copy failed';
+          node.classList.toggle('im-copied', ok);
+          clearTimeout(timer);
+          timer = setTimeout(() => { tag.textContent = 'copy'; node.classList.remove('im-copied'); }, COPIED_MS);
+          focusTerminal();
+        });
+      });
+      return { marker, decoration };
+    }
+
+    function placeSnippets(rows, list) {
+      for (const item of list) {
+        const have = (boxes.get(item.id) || []).filter((b) => live(b.marker));
+        const taken = new Set(have.map((b) => b.marker.line));
+        for (const range of match.findBlocks(rows, item.text)) {
+          if (taken.has(range.start)) continue;
+          const box = drawBox(item, range);
+          if (box) have.push(box);
+        }
+        boxes.set(item.id, have);
+        if (have.length) pending.delete(item.id);
+      }
+    }
+
+    // ── Image thumbnails ──
+    function urlFor(item) {
+      return `/api/media/${sessionId}/${encodeURIComponent(item.file)}`;
+    }
+    async function blobUrl(item) {
+      if (blobUrls.has(item.id)) return blobUrls.get(item.id);
+      const res = await fetchFn(urlFor(item));
+      if (!res.ok) throw new Error(`media ${res.status}`);
+      const url = URL.createObjectURL(await res.blob());
+      blobUrls.set(item.id, url);
+      return url;
+    }
+
+    /** Room on the right of `row` and the rows under it for a taller chip. */
+    function chipHeight(rows, row, cells) {
+      for (let k = row + 1; k < row + TALL_ROWS; k++) {
+        if (k >= rows.length || rows[k].trimEnd().length > term.cols - cells - 1) return 1;
+      }
+      return TALL_ROWS;
+    }
+
+    function redrawChips(rows) {
+      for (const chip of chips.values()) { chip.decoration.dispose(); chip.marker.dispose(); }
+      chips.clear();
+      const byLine = new Map();
+      for (const item of images) {
+        const marker = imageRow.get(item.id);
+        if (!live(marker)) continue;
+        if (!byLine.has(marker.line)) byLine.set(marker.line, []);
+        byLine.get(marker.line).push(item);
+      }
+      for (const [line, list] of byLine) {
+        const shown = list.slice(0, MAX_THUMBS).reverse(); // oldest left
+        const cells = shown.length * THUMB_CELLS + (list.length > MAX_THUMBS ? 3 : 0);
+        const marker = markerAt(line);
+        if (!marker) continue;
+        const decoration = term.registerDecoration({
+          marker, anchor: 'right', x: 1, width: cells, height: chipHeight(rows, line, cells), layer: 'top',
+        });
+        if (!decoration) { marker.dispose(); continue; }
+        decoration.onRender((node) => {
+          if (node.dataset.chip) return;
+          node.dataset.chip = '1';
+          node.classList.add('im-chip');
+          node.addEventListener('mousedown', (e) => e.stopPropagation());
+          for (const item of shown) node.append(thumbFor(item));
+          if (list.length > MAX_THUMBS) node.append(el('span', 'im-more', `+${list.length - MAX_THUMBS}`));
+        });
+        chips.set(line, { marker, decoration });
+      }
+    }
+
+    function thumbFor(item) {
+      const img = el('img', 'im-thumb');
+      img.alt = item.toolName || 'image';
+      img.draggable = false;
+      blobUrl(item).then((u) => { img.src = u; }).catch(() => img.remove());
+      img.addEventListener('mouseenter', () => showPreview(img, item));
+      img.addEventListener('mouseleave', hidePreview);
+      img.addEventListener('click', (e) => { e.stopPropagation(); hidePreview(); openLightbox(item); });
+      return img;
+    }
+
+    // Hover preview
+    const preview = el('div', 'im-preview');
+    preview.hidden = true;
+    const previewImg = el('img');
+    preview.append(previewImg);
+    function showPreview(anchor, item) {
+      blobUrl(item).then((u) => {
+        previewImg.src = u;
+        const r = anchor.getBoundingClientRect();
+        preview.hidden = false;
+        const top = Math.max(4, Math.min(r.top, global.innerHeight - PREVIEW_MAX_PX - 8));
+        preview.style.top = `${top}px`;
+        preview.style.right = `${Math.max(4, global.innerWidth - r.left + 6)}px`;
+      }).catch(() => {});
+    }
+    function hidePreview() { preview.hidden = true; }
+
+    // Lightbox
+    const lightbox = el('div', 'im-lightbox');
+    lightbox.hidden = true;
+    lightbox.tabIndex = -1;
+    const lbImg = el('img');
+    const lbBar = el('div', 'im-lb-bar');
+    const lbMeta = el('span', 'im-lb-meta');
+    const lbCopy = el('button', null, 'Copy path');
+    const lbOpen = el('button', null, 'Open');
+    lbBar.append(lbMeta, lbCopy, lbOpen);
+    lightbox.append(lbImg, lbBar);
+    let lbItem = null;
+    function openLightbox(item) {
+      lbItem = item;
+      lbImg.removeAttribute('src');
+      blobUrl(item).then((u) => { if (lbItem === item) lbImg.src = u; }).catch(() => {});
+      const bits = [item.toolName || 'image'];
+      if (item.width && item.height) bits.push(`${item.width}×${item.height}`);
+      if (item.sourcePath) bits.push(item.sourcePath);
+      bits.push(new Date(item.at).toLocaleString());
+      lbMeta.textContent = bits.join(' · ');
+      lbCopy.hidden = !item.sourcePath;
+      lightbox.hidden = false;
+      lightbox.focus();
+    }
+    function closeLightbox() {
+      if (lightbox.hidden) return;
+      lightbox.hidden = true;
+      lbItem = null;
+      focusTerminal();
+    }
+    lightbox.addEventListener('keydown', (e) => {
+      if (e.key === KEY_ESCAPE) { e.preventDefault(); e.stopPropagation(); closeLightbox(); }
+    });
+    lightbox.addEventListener('click', (e) => { if (e.target === lightbox || e.target === lbImg) closeLightbox(); });
+    lbCopy.addEventListener('click', () => { if (lbItem && lbItem.sourcePath) copy(lbItem.sourcePath); });
+    lbOpen.addEventListener('click', () => { if (lbItem) global.open(urlFor(lbItem), '_blank'); });
+    document.body.append(preview, lightbox);
+
+    // ── Scanning ──
+    function scan(full) {
+      if (!match || term.buffer.active.type !== 'normal') return;
+      const rows = bufferRows();
+      const now = Date.now();
+      const due = full ? snippets : snippets.filter((s) => pending.has(s.id));
+      placeSnippets(rows, due);
+      for (const [id, since] of pending) if (now - since > PENDING_TTL_MS) pending.delete(id);
+      if (full) {
+        const unplaced = images.filter((i) => !live(imageRow.get(i.id)));
+        for (const [id, row] of match.placeImages(rows, unplaced)) {
+          const marker = markerAt(row);
+          if (marker) imageRow.set(id, marker);
+        }
+      }
+      redrawChips(rows);
+    }
+    function scheduleScan(full) {
+      clearTimeout(scanTimer);
+      scanTimer = setTimeout(() => scan(full), SCAN_DEBOUNCE_MS);
+    }
+    // New output may be the block a pending snippet is waiting for.
+    term.onWriteParsed(() => { if (pending.size) scheduleScan(false); });
+    // A width change re-wraps rows: redraw everything at the new positions.
+    term.onResize(() => { clearAll(false); scheduleScan(true); });
+
+    function clearAll(dropImages) {
+      for (const list of boxes.values()) for (const b of list) { b.decoration.dispose(); b.marker.dispose(); }
+      boxes.clear();
+      for (const chip of chips.values()) { chip.decoration.dispose(); chip.marker.dispose(); }
+      chips.clear();
+      if (dropImages) {
+        for (const m of imageRow.values()) m.dispose();
+        imageRow.clear();
+      }
+    }
+
+    // ── Public API ──
+    async function attach(id) {
+      const changed = id !== sessionId;
+      sessionId = id;
+      // A (re)attach rewrites the buffer from the replayed scrollback, so
+      // every position is new.
+      clearAll(true);
+      if (changed) {
+        for (const url of blobUrls.values()) URL.revokeObjectURL(url);
+        blobUrls.clear();
+      }
+      try {
+        const [s, m] = await Promise.all([
+          fetchFn(`/api/snippets/${id}`).then((r) => (r.ok ? r.json() : { items: [] })),
+          fetchFn(`/api/media/${id}`).then((r) => (r.ok ? r.json() : { items: [] })),
+        ]);
+        if (sessionId !== id) return;
+        snippets = Array.isArray(s.items) ? s.items : [];
+        images = Array.isArray(m.items) ? m.items : [];
+      } catch {}
+      scheduleScan(true);
+    }
+
+    function pushSnippet(item) {
+      if (!item || typeof item.text !== 'string' || snippets.some((s) => s.id === item.id)) return;
+      snippets.unshift(item);
+      pending.set(item.id, Date.now());
+      scheduleScan(false);
+    }
+
+    function pushImage(item) {
+      if (!item || !item.id || images.some((i) => i.id === item.id)) return;
+      images.unshift(item);
+      // Arriving live: it belongs to whatever the agent is showing right now.
+      if (match && term.buffer.active.type === 'normal') {
+        const rows = bufferRows();
+        const b = term.buffer.normal;
+        const row = match.liveActivityRow(rows, b.baseY + b.cursorY);
+        const marker = row >= 0 ? markerAt(row) : null;
+        if (marker) imageRow.set(item.id, marker);
+      }
+      scheduleScan(false);
+    }
+
+    function removeImage(id) {
+      images = images.filter((i) => i.id !== id);
+      const marker = imageRow.get(id);
+      if (marker) marker.dispose();
+      imageRow.delete(id);
+      const url = blobUrls.get(id);
+      if (url) URL.revokeObjectURL(url);
+      blobUrls.delete(id);
+      if (lbItem && lbItem.id === id) closeLightbox();
+      scheduleScan(false);
+    }
+
+    return { attach, pushSnippet, pushImage, removeImage };
+  }
+
+  const api = { create };
+  if (typeof module !== 'undefined' && module.exports) module.exports = api;
+  if (global) global.InlineMarks = api;
+})(typeof window !== 'undefined' ? window : null);
