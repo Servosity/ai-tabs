@@ -17,9 +17,14 @@
   const SCAN_DEBOUNCE_MS = 400;
   const PENDING_TTL_MS = 60 * 1000;
   const COPIED_MS = 1200;
-  const THUMB_CELLS = 4;
   const MAX_THUMBS = 4;
   const TALL_ROWS = 3;
+  const MORE_CELLS = 3;       // the "+N" label
+  const CHIP_GAP_CELLS = 2;   // clear space kept between text and a chip
+  // Only an image this fresh is pinned to the agent's current line. Older
+  // ones arrive when a restarted server re-reads the transcript, and the
+  // current line has nothing to do with them.
+  const LIVE_WINDOW_MS = 60 * 1000;
   const PREVIEW_MAX_PX = 360;
   const KEY_ESCAPE = 'Escape';
 
@@ -120,12 +125,39 @@
       return url;
     }
 
-    /** Room on the right of `row` and the rows under it for a taller chip. */
-    function chipHeight(rows, row, cells) {
-      for (let k = row + 1; k < row + TALL_ROWS; k++) {
-        if (k >= rows.length || rows[k].trimEnd().length > term.cols - cells - 1) return 1;
+    /** Pixel size of one terminal cell. */
+    function cellSize() {
+      const screenEl = term.element && term.element.querySelector('.xterm-screen');
+      if (!screenEl || !term.cols || !term.rows) return null;
+      return { w: screenEl.clientWidth / term.cols, h: screenEl.clientHeight / term.rows };
+    }
+
+    /** Cells wide the thumbnails take at `height` rows, from each image's shape. */
+    function chipCells(list, height, cell) {
+      let px = 0;
+      for (const item of list) {
+        const ratio = item.width && item.height ? item.width / item.height : 1;
+        px += height * cell.h * ratio + 3;
       }
-      return TALL_ROWS;
+      return Math.ceil(px / cell.w);
+    }
+
+    /**
+     * The tallest chip (TALL_ROWS down to 1) whose width fits in the empty
+     * space at the right of every row it covers, or null when even one row
+     * has no room: a thumbnail never covers text.
+     */
+    function fitChip(rows, row, shown, extraCells, cell, chipLines) {
+      for (let height = TALL_ROWS; height >= 1; height--) {
+        const cells = chipCells(shown, height, cell) + extraCells;
+        let fits = row + height <= rows.length;
+        for (let k = row; fits && k < row + height; k++) {
+          if (rows[k].trimEnd().length > term.cols - cells - CHIP_GAP_CELLS) fits = false;
+          if (k > row && chipLines.has(k)) fits = false; // another line's own chip
+        }
+        if (fits) return { height, cells };
+      }
+      return null;
     }
 
     function redrawChips(rows) {
@@ -138,13 +170,16 @@
         if (!byLine.has(marker.line)) byLine.set(marker.line, []);
         byLine.get(marker.line).push(item);
       }
+      const cell = cellSize();
+      if (!cell) return;
       for (const [line, list] of byLine) {
         const shown = list.slice(0, MAX_THUMBS).reverse(); // oldest left
-        const cells = shown.length * THUMB_CELLS + (list.length > MAX_THUMBS ? 3 : 0);
+        const fit = fitChip(rows, line, shown, list.length > MAX_THUMBS ? MORE_CELLS : 0, cell, byLine);
+        if (!fit) continue;
         const marker = markerAt(line);
         if (!marker) continue;
         const decoration = term.registerDecoration({
-          marker, anchor: 'right', x: 1, width: cells, height: chipHeight(rows, line, cells), layer: 'top',
+          marker, anchor: 'right', x: 1, width: fit.cells, height: fit.height, layer: 'top',
         });
         if (!decoration) { marker.dispose(); continue; }
         decoration.onRender((node) => {
@@ -242,6 +277,8 @@
         }
       }
       redrawChips(rows);
+      // Decorations draw on the next repaint; an idle terminal has none due.
+      term.refresh(0, term.rows - 1);
     }
     function scheduleScan(full) {
       clearTimeout(scanTimer);
@@ -297,10 +334,16 @@
       if (!item || !item.id || images.some((i) => i.id === item.id)) return;
       images.unshift(item);
       // Arriving live: it belongs to whatever the agent is showing right now.
+      // A re-read of an old transcript goes through placeImages instead.
+      const fresh = Date.now() - (item.at || 0) < LIVE_WINDOW_MS;
+      if (!fresh) { scheduleScan(true); return; }
       if (match && term.buffer.active.type === 'normal') {
         const rows = bufferRows();
         const b = term.buffer.normal;
-        const row = match.liveActivityRow(rows, b.baseY + b.cursorY);
+        // A line that names the image ("[Image #1]", a screenshot call)
+        // beats the agent's current line.
+        const named = match.placeImages(rows, [item]).get(item.id);
+        const row = named != null ? named : match.liveActivityRow(rows, b.baseY + b.cursorY);
         const marker = row >= 0 ? markerAt(row) : null;
         if (marker) imageRow.set(item.id, marker);
       }

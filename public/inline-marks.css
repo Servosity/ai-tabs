@@ -29,12 +29,14 @@
 .im-box:hover .im-tag, .im-box.im-copied .im-tag { opacity: 1; }
 .im-box.im-copied .im-tag { background: var(--success, #4caf50); }
 
+/* Sized in cells by inline-marks.js from each image's shape; overflow is
+   clipped so a thumbnail can never spill onto the text beside it. */
 .xterm-decoration.im-chip {
   pointer-events: auto; display: flex; gap: 3px; align-items: stretch; justify-content: flex-end;
-  padding: 1px 0;
+  padding: 1px 0; box-sizing: border-box; overflow: hidden;
 }
 .im-thumb {
-  height: 100%; max-width: 100%; aspect-ratio: auto; object-fit: cover; min-width: 0; flex: 0 1 auto;
+  height: 100%; width: auto; flex: 0 0 auto; object-fit: contain; box-sizing: border-box;
   border-radius: 3px; cursor: zoom-in; border: 1px solid var(--sl-border, #2a3a5c);
   background: var(--sl-bar-bg, #1c1c2e);
 }

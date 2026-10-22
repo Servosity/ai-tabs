@@ -50,6 +50,9 @@ test('every copy of a block is found, bottom-most first; text not on screen is n
 test('a live image belongs to the last agent line above the input box, past the spinner', () => {
   const rows = ['● Taking a screenshot', '  claude-in-chrome - computer (MCP)', '', '✶ Thinking…', '', '──────────', '❯ ', '──────────'];
   assert.equal(liveActivityRow(rows, 6), 1);
+  // Cursor on (or under) the box's bottom rule: still the line above the box.
+  assert.equal(liveActivityRow(rows, 7), 1);
+  assert.equal(liveActivityRow([...rows, '  status line'], 8), 1);
   assert.equal(liveActivityRow(['no input box here'], 0), -1);
 });
 

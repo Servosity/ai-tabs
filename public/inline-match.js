@@ -22,8 +22,10 @@
 
   const PASTE_RE = /\[Image #\d+\]/;
   const MCP_RE = /\(MCP\)/;
+  const READ_CALL_RE = /\bRead\(/;
   const SPINNER_RE = /^\s*[✻✶✽✢·*]\s/;
   const INPUT_RULE_RE = /^─{8,}/;
+  const INPUT_BOX_MAX_ROWS = 6; // rows between the input box's two rules, at most
 
   function normalize(text) {
     return String(text || '').replace(LINK_RE, '$1').replace(NOISE_RE, '');
@@ -70,6 +72,10 @@
   function liveActivityRow(rows, cursorRow) {
     let r = Math.min(cursorRow, rows.length - 1);
     while (r >= 0 && !INPUT_RULE_RE.test(rows[r])) r--;
+    // The cursor may sit on or below the box's bottom rule: climb to its top one.
+    for (let k = r - 1; k >= 0 && k >= r - INPUT_BOX_MAX_ROWS; k--) {
+      if (INPUT_RULE_RE.test(rows[k])) { r = k; break; }
+    }
     for (r--; r >= 0; r--) {
       const t = rows[r];
       if (!t.trim() || SPINNER_RE.test(t) || INPUT_RULE_RE.test(t)) continue;
@@ -100,7 +106,7 @@
       else if (img.sourcePath) {
         const base = img.sourcePath.split(/[\\/]/).pop();
         for (let r = rows.length - 1; r >= 0; r--) {
-          if (base && rows[r].includes(base)) { placed.set(img.id, r); break; }
+          if (base && READ_CALL_RE.test(rows[r]) && rows[r].includes(base)) { placed.set(img.id, r); break; }
         }
       }
     }
