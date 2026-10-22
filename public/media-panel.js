@@ -6,6 +6,7 @@
  *   const panel = MediaPanel.create({ container, focusTerminal, badge });
  *   panel.attach(sessionId)      on 'created' / 'attached'
  *   panel.push(item)             on {type:'media'}
+ *   panel.pushSnippet(item)      on {type:'snippet'} (the "Copy" tab)
  *   panel.remove(id)             on {type:'media-removed'}
  *   panel.setBottom(px)          when the statusline shows/hides
  *
@@ -22,6 +23,9 @@
   const MAX_WIDTH_FRACTION = 0.5;
   const LS_WIDTH = 'ai-tabs.media.width';
   const LS_OPEN = 'ai-tabs.media.open';
+  const LS_TAB = 'ai-tabs.media.tab';
+  const TAB_IMAGES = 'images';
+  const TAB_COPY = 'copy';
 
   const KEY_ESCAPE = 'Escape';
   const KEY_PREV = 'ArrowLeft';
@@ -102,14 +106,25 @@
     rail.title = 'Show images';
     rail.append(el('span', 'mp-rail-icon', '\u{1F5BC}'), el('span', 'mp-rail-count'), el('span', 'mp-rail-label', 'images'));
     const head = el('div', 'mp-head');
-    const title = el('span', 'mp-title', 'Images');
+    const imagesTab = el('button', 'mp-tab', 'Images ');
     const count = el('span', 'mp-count');
+    imagesTab.append(count);
+    const copyTab = el('button', 'mp-tab', 'Copy ');
+    const copyCount = el('span', 'mp-count');
+    copyTab.append(copyCount);
+    copyTab.title = 'Code blocks and quotes from the agent; click one to copy it';
     const size = el('span', 'mp-size');
     const collapseBtn = el('button', 'mp-btn', '›');
     collapseBtn.title = 'Collapse panel';
-    head.append(title, count, size, collapseBtn);
+    head.append(imagesTab, copyTab, size, collapseBtn);
     const list = el('div', 'mp-list');
+    // The "Copy" tab (public/snippet-list.js); absent if that script is not loaded.
+    const snippets = global.SnippetList
+      ? global.SnippetList.create({ copy: copyText, onChange: () => { renderHead(); layout(); } })
+      : null;
+    let activeTab = lsGet(LS_TAB, TAB_IMAGES);
     panel.append(resize, rail, head, list);
+    if (snippets) panel.append(snippets.element);
 
     const lightbox = el('div');
     lightbox.id = 'media-lightbox';
@@ -137,8 +152,30 @@
       const max = Math.max(MIN_WIDTH, Math.floor(global.innerWidth * MAX_WIDTH_FRACTION));
       return Math.min(max, Math.max(MIN_WIDTH, Math.round(w)));
     }
+    function snippetCount() {
+      return snippets ? snippets.count : 0;
+    }
+    /** The chosen tab, unless it is empty and the other one is not. */
+    function shownTab() {
+      if (activeTab === TAB_COPY && !snippetCount() && items.length) return TAB_IMAGES;
+      if (activeTab !== TAB_COPY && !items.length && snippetCount()) return TAB_COPY;
+      return activeTab === TAB_COPY ? TAB_COPY : TAB_IMAGES;
+    }
+    function selectTab(tab) {
+      activeTab = tab;
+      lsSet(LS_TAB, tab);
+      layout();
+    }
     function layout() {
-      const visible = items.length > 0;
+      const visible = items.length > 0 || snippetCount() > 0;
+      const tab = shownTab();
+      list.hidden = tab !== TAB_IMAGES;
+      if (snippets) snippets.element.hidden = tab !== TAB_COPY;
+      imagesTab.classList.toggle('mp-active', tab === TAB_IMAGES);
+      copyTab.classList.toggle('mp-active', tab === TAB_COPY);
+      copyTab.hidden = !snippets;
+      size.hidden = tab !== TAB_IMAGES;
+      rail.querySelector('.mp-rail-label').textContent = tab === TAB_COPY ? 'copy' : 'images';
       panel.classList.toggle('mp-hidden', !visible);
       panel.classList.toggle('mp-collapsed', !open);
       panel.style.width = `${clampWidth(width)}px`;
@@ -212,6 +249,7 @@
     }
     function renderHead() {
       count.textContent = items.length ? String(items.length) : '';
+      copyCount.textContent = snippetCount() ? String(snippetCount()) : '';
       size.textContent = fmtBytes(items.reduce((n, i) => n + (i.bytes || 0), 0));
     }
 
@@ -237,11 +275,15 @@
     }
     document.addEventListener('mousedown', (e) => { if (menu && !menu.contains(e.target)) hideMenu(); }, true);
 
+    /** @returns {Promise<boolean>} whether the clipboard took the text */
     async function copyText(text) {
       try {
         if (global.electronClipboard && global.electronClipboard.write) await global.electronClipboard.write(text);
         else await navigator.clipboard.writeText(text);
-      } catch {}
+        return true;
+      } catch {
+        return false;
+      }
     }
     async function deleteItem(item) {
       try {
@@ -291,6 +333,8 @@
 
     // ── Panel chrome ──
     rail.addEventListener('click', () => setOpen(true));
+    imagesTab.addEventListener('click', () => selectTab(TAB_IMAGES));
+    copyTab.addEventListener('click', () => selectTab(TAB_COPY));
     collapseBtn.addEventListener('click', () => setOpen(false));
     list.addEventListener('scroll', () => { if (open && unseen) markAllSeen(); });
 
@@ -322,7 +366,9 @@
         for (const key of [...blobUrls.keys()]) revoke(key);
         seen.clear();
         unseen = 0;
+        if (snippets) snippets.set([]);
       }
+      if (snippets) attachSnippets(id);
       try {
         const res = await fetchFn(`/api/media/${id}`);
         if (!res.ok) return;
@@ -335,6 +381,19 @@
         renderAll();
         reportBadge();
       } catch {}
+    }
+
+    async function attachSnippets(id) {
+      try {
+        const res = await fetchFn(`/api/snippets/${id}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        if (sessionId === id) snippets.set(data.items);
+      } catch {}
+    }
+
+    function pushSnippet(item) {
+      if (snippets) snippets.push(item);
     }
 
     function push(item) {
@@ -384,7 +443,7 @@
     }
 
     layout();
-    return { attach, push, remove, setBottom, setOpen, destroy, get items() { return items.slice(); } };
+    return { attach, push, pushSnippet, remove, setBottom, setOpen, destroy, get items() { return items.slice(); } };
   }
 
   const api = { create, toolShort, fmtBytes };

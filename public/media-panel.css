@@ -126,3 +126,46 @@ body.mp-resizing #terminal { pointer-events: none; }
   position: absolute; top: 8px; right: 12px; background: none; border: none;
   color: #eee; font-size: 24px; cursor: pointer; line-height: 1;
 }
+
+/* Header tabs: Images | Copy */
+.mp-tab {
+  background: none; border: none; color: var(--sl-muted, #5c6370); cursor: pointer;
+  font: inherit; font-weight: 600; padding: 3px 4px; border-bottom: 2px solid transparent;
+}
+.mp-tab:hover { color: inherit; }
+.mp-tab.mp-active { color: inherit; border-bottom-color: var(--accent, #9d7ee0); }
+.mp-tab[hidden] { display: none; }
+.mp-tab .mp-count { font-weight: 400; }
+.mp-list[hidden], .sn-list[hidden] { display: none; }
+
+/* Copy tab (public/snippet-list.js): one click-to-copy box per code block / quote */
+.sn-list {
+  flex: 1; overflow-y: auto; overflow-x: hidden; padding: 6px;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.sn-list::-webkit-scrollbar { width: 6px; }
+.sn-list::-webkit-scrollbar-thumb { background: var(--sl-border, #2a3a5c); border-radius: 3px; }
+.sn-empty { color: var(--sl-muted, #5c6370); text-align: center; padding: 18px 4px; }
+.sn-box {
+  flex-shrink: 0; border-radius: 5px; cursor: copy; overflow: hidden;
+  background: var(--sl-bar-bg, #1c1c2e); border: 1px solid var(--sl-border, #2a3a5c);
+}
+.sn-box:hover, .sn-box:focus-visible { border-color: var(--accent, #9d7ee0); outline: none; }
+.sn-box.sn-copied { border-color: var(--success, #4caf50); }
+.sn-quote { border-left: 3px solid var(--accent, #9d7ee0); }
+.sn-cap {
+  display: flex; gap: 6px; padding: 3px 6px; font-size: 10px;
+  color: var(--sl-muted, #5c6370); border-bottom: 1px solid var(--sl-border, #2a3a5c);
+}
+.sn-kind { font-weight: 600; color: inherit; }
+.sn-status { margin-left: auto; }
+.sn-box:hover .sn-status { color: var(--accent, #9d7ee0); }
+.sn-box.sn-copied .sn-status { color: var(--success, #4caf50); }
+.sn-text {
+  margin: 0; padding: 5px 6px; max-height: 12.5em; overflow: hidden;
+  font-family: 'Cascadia Mono', Consolas, 'SF Mono', Menlo, monospace; font-size: 11px; line-height: 1.35;
+  white-space: pre-wrap; word-break: break-word; user-select: text;
+}
+.sn-quote .sn-text { font-family: inherit; font-size: 11.5px; }
+.sn-long .sn-text { -webkit-mask-image: linear-gradient(#000 75%, transparent); mask-image: linear-gradient(#000 75%, transparent); }
+.mp-size[hidden] + .mp-btn { margin-left: auto; }
