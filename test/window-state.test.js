@@ -45,19 +45,44 @@ test('a window whose title strip is above the screen loses its position', () => 
   assert.equal('x' in windowState.fitToDisplays(saved, [LAPTOP]), false);
 });
 
-test('tracking saves the restored size of a maximized window when it closes', () => {
+function fakeWindow() {
+  const win = new EventEmitter();
+  return Object.assign(win, {
+    isDestroyed: () => false, isMinimized: () => false, isFullScreen: () => false, isVisible: () => false,
+    isMaximized: () => true,
+    getNormalBounds: () => ({ x: 50, y: 60, width: 1500, height: 950 }),
+    getBounds: () => ({ x: 0, y: 0, width: 1920, height: 1040 }),
+  });
+}
+const tick = (ms) => new Promise((r) => setTimeout(r, ms));
+
+test('a user resize is saved on close, as the restored size of a maximized window', async () => {
   const { dir, file } = tmpFile();
   try {
-    const win = new EventEmitter();
-    Object.assign(win, {
-      isDestroyed: () => false, isMinimized: () => false, isFullScreen: () => false,
-      isMaximized: () => true,
-      getNormalBounds: () => ({ x: 50, y: 60, width: 1500, height: 950 }),
-      getBounds: () => ({ x: 0, y: 0, width: 1920, height: 1040 }),
-    });
-    windowState.track(win, file, 'local');
+    const win = fakeWindow();
+    windowState.track(win, file, 'local', { settleMs: 5 });
+    win.emit('show');
+    await tick(20);
+    win.emit('resize');
     win.emit('close');
     assert.deepEqual(windowState.load(file, 'local'), { x: 50, y: 60, width: 1500, height: 950, maximized: true });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the window placing itself at launch is not saved, so the size cannot creep', async () => {
+  const { dir, file } = tmpFile();
+  try {
+    windowState.save(file, 'local', { x: 1, y: 2, width: 1854, height: 1184, maximized: false });
+    const win = fakeWindow();
+    windowState.track(win, file, 'local', { settleMs: 30 });
+    win.emit('resize'); // before it shows
+    win.emit('show');
+    win.emit('resize'); // while settling
+    await tick(60);
+    win.emit('close'); // nothing the user did
+    assert.deepEqual(windowState.load(file, 'local'), { x: 1, y: 2, width: 1854, height: 1184, maximized: false });
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

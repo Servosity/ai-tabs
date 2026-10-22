@@ -754,6 +754,12 @@ function createWindow(opts = {}) {
   win.contentView.addChildView(tabBarView);
   tabBarView.webContents.loadFile(path.join(__dirname, 'tab-bar.html'));
 
+  // The constructor's width/height and getBounds() disagree by the frame on
+  // Windows, so a remembered size would creep a few pixels per launch; set
+  // the outer bounds exactly, in the same terms they were saved in.
+  if (opts.width && opts.height && opts.x != null && opts.y != null) {
+    win.setBounds({ x: opts.x, y: opts.y, width: opts.width, height: opts.height });
+  }
   windowState.track(win, WINDOW_STATE_FILE, WINDOW_STATE_KEY);
   if (opts.maximized) win.once('show', () => { if (!win.isDestroyed()) win.maximize(); });
 
