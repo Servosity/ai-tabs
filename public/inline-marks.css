@@ -1,5 +1,6 @@
 /* Inline marks (public/inline-marks.js): copy boxes over the agent's code
-   blocks and quotes, image thumbnails at the end of the line they came from.
+   blocks and quotes, image thumbnails right-aligned in blank rows inserted
+   under the line they came from.
    Both are xterm decorations, so they scroll with the text. */
 
 .xterm-decoration.im-box {

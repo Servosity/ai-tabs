@@ -1,7 +1,7 @@
 /**
  * Inline marks — click-to-copy boxes over the code blocks and quotes the
- * agent wrote, and image thumbnails on the line where each image happened,
- * drawn in the terminal itself as xterm decorations so they scroll with the
+ * agent wrote, and image thumbnails in blank rows inserted under the line
+ * where each image happened, drawn in the terminal itself as xterm decorations so they scroll with the
  * text. Positions come from public/inline-match.js.
  *
  * Usage (index.html, terminal mode):
@@ -18,9 +18,8 @@
   const PENDING_TTL_MS = 60 * 1000;
   const COPIED_MS = 1200;
   const MAX_THUMBS = 4;
-  const TALL_ROWS = 3;
+  const GAP_ROWS = 3;         // blank rows inserted under an image's line
   const MORE_CELLS = 3;       // the "+N" label
-  const CHIP_GAP_CELLS = 2;   // clear space kept between text and a chip
   // Only an image this fresh is pinned to the agent's current line. Older
   // ones arrive when a restarted server re-reads the transcript, and the
   // current line has nothing to do with them.
@@ -48,6 +47,8 @@
     const boxes = new Map();     // snippet id → [{marker, decoration}]
     const imageRow = new Map();  // image id → marker (live anchor or placed)
     const chips = new Map();     // marker line → {marker, decoration, ids}
+    const gaps = new Map();      // image line → {anchor, top} markers of its inserted rows
+    let waitingForScroll = false; // an image line is still on screen, gap not yet inserted
     const pending = new Map();   // snippet id → first seen (ms), until drawn
     const blobUrls = new Map();
     let scanTimer = null;
@@ -143,26 +144,31 @@
     }
 
     /**
-     * The tallest chip (TALL_ROWS down to 1) whose width fits in the empty
-     * space at the right of every row it covers, or null when even one row
-     * has no room: a thumbnail never covers text.
+     * Splice `n` blank rows into the buffer at absolute row `at`. Only rows
+     * already in scrollback: the agent can't address those any more, so
+     * growing them never desyncs its cursor. Markers below shift on their
+     * own (xterm listens to the line list's insert/trim events). Uses xterm
+     * internals; returns false if they're not there.
      */
-    function fitChip(rows, row, shown, extraCells, cell, chipLines) {
-      for (let height = TALL_ROWS; height >= 1; height--) {
-        const cells = chipCells(shown, height, cell) + extraCells;
-        let fits = row + height <= rows.length;
-        for (let k = row; fits && k < row + height; k++) {
-          if (rows[k].trimEnd().length > term.cols - cells - CHIP_GAP_CELLS) fits = false;
-          if (k > row && chipLines.has(k)) fits = false; // another line's own chip
-        }
-        if (fits) return { height, cells };
-      }
-      return null;
+    function insertBlankRows(at, n) {
+      const core = term._core;
+      const buf = core && core.buffers && core.buffers.normal;
+      if (!buf || !buf.lines || typeof buf.getBlankLine !== 'function') return false;
+      if (at > buf.ybase) return false;
+      const atBottom = buf.ydisp === buf.ybase;
+      const before = buf.lines.length;
+      const blanks = [];
+      for (let i = 0; i < n; i++) blanks.push(buf.getBlankLine(buf.getNullCell()));
+      buf.lines.splice(at, 0, ...blanks);
+      const trimmed = before + n - buf.lines.length; // a full scrollback drops its oldest rows
+      buf.ybase += n - trimmed;
+      buf.ydisp = atBottom ? buf.ybase : Math.max(0, buf.ydisp + (buf.ydisp >= at ? n : 0) - trimmed);
+      if (core.viewport) core.viewport.syncScrollArea(true);
+      return true;
     }
 
-    function redrawChips(rows) {
-      for (const chip of chips.values()) { chip.decoration.dispose(); chip.marker.dispose(); }
-      chips.clear();
+    /** Image ids grouped by the line their marker sits on. */
+    function imagesByLine() {
       const byLine = new Map();
       for (const item of images) {
         const marker = imageRow.get(item.id);
@@ -170,16 +176,48 @@
         if (!byLine.has(marker.line)) byLine.set(marker.line, []);
         byLine.get(marker.line).push(item);
       }
+      return byLine;
+    }
+
+    /**
+     * Give every image line its own blank rows underneath. A line still on
+     * screen waits until it scrolls into scrollback (see insertBlankRows),
+     * so a thumbnail never sits over text.
+     */
+    function ensureGaps() {
+      waitingForScroll = false;
+      const ybase = term.buffer.normal.baseY;
+      for (const line of [...imagesByLine().keys()].sort((a, b) => b - a)) { // bottom up: inserts don't move lines above
+        const have = gaps.get(line);
+        if (have && live(have.anchor) && have.anchor.line === line && live(have.top)) continue;
+        if (line >= ybase) { waitingForScroll = true; continue; }
+        if (!insertBlankRows(line + 1, GAP_ROWS)) continue;
+        const anchor = markerAt(line);
+        const top = markerAt(line + 1);
+        if (anchor && top) gaps.set(line, { anchor, top });
+      }
+      // Re-key by current line: earlier inserts moved the gaps below them.
+      const rekeyed = [...gaps.values()].filter((g) => live(g.anchor) && live(g.top));
+      gaps.clear();
+      for (const g of rekeyed) gaps.set(g.anchor.line, g);
+    }
+
+    function redrawChips() {
+      for (const chip of chips.values()) { chip.decoration.dispose(); chip.marker.dispose(); }
+      chips.clear();
+      ensureGaps();
       const cell = cellSize();
       if (!cell) return;
-      for (const [line, list] of byLine) {
+      for (const [line, list] of imagesByLine()) {
+        const gap = gaps.get(line);
+        if (!gap) continue;
         const shown = list.slice(0, MAX_THUMBS).reverse(); // oldest left
-        const fit = fitChip(rows, line, shown, list.length > MAX_THUMBS ? MORE_CELLS : 0, cell, byLine);
-        if (!fit) continue;
-        const marker = markerAt(line);
+        const extra = list.length > MAX_THUMBS ? MORE_CELLS : 0;
+        const cells = Math.min(chipCells(shown, GAP_ROWS, cell) + extra, term.cols - 1);
+        const marker = markerAt(gap.top.line);
         if (!marker) continue;
         const decoration = term.registerDecoration({
-          marker, anchor: 'right', x: 1, width: fit.cells, height: fit.height, layer: 'top',
+          marker, anchor: 'right', x: 1, width: cells, height: GAP_ROWS, layer: 'top',
         });
         if (!decoration) { marker.dispose(); continue; }
         decoration.onRender((node) => {
@@ -276,7 +314,7 @@
           if (marker) imageRow.set(id, marker);
         }
       }
-      redrawChips(rows);
+      redrawChips();
       // Decorations draw on the next repaint; an idle terminal has none due.
       term.refresh(0, term.rows - 1);
     }
@@ -286,6 +324,8 @@
     }
     // New output may be the block a pending snippet is waiting for.
     term.onWriteParsed(() => { if (pending.size) scheduleScan(false); });
+    // An image line scrolling into scrollback can now get its rows.
+    term.onScroll(() => { if (waitingForScroll) scheduleScan(false); });
     // A width change re-wraps rows: redraw everything at the new positions.
     term.onResize(() => { clearAll(false); scheduleScan(true); });
 
@@ -297,6 +337,9 @@
       if (dropImages) {
         for (const m of imageRow.values()) m.dispose();
         imageRow.clear();
+        // The buffer is being rewritten, inserted rows and all.
+        for (const g of gaps.values()) { g.anchor.dispose(); g.top.dispose(); }
+        gaps.clear();
       }
     }
 
