@@ -1,7 +1,7 @@
 /**
  * Inline marks — click-to-copy boxes over the code blocks and quotes the
- * agent wrote, and image thumbnails in blank rows inserted under the line
- * where each image happened, drawn in the terminal itself as xterm decorations so they scroll with the
+ * agent wrote, and the images themselves in blank rows inserted under the
+ * line where each image happened, drawn in the terminal itself as xterm decorations so they scroll with the
  * text. Positions come from public/inline-match.js.
  *
  * Usage (index.html, terminal mode):
@@ -17,14 +17,14 @@
   const SCAN_DEBOUNCE_MS = 400;
   const PENDING_TTL_MS = 60 * 1000;
   const COPIED_MS = 1200;
-  const MAX_THUMBS = 4;
-  const GAP_ROWS = 3;         // blank rows inserted under an image's line
-  const MORE_CELLS = 3;       // the "+N" label
+  const IMAGE_INDENT_CELLS = 2;  // lines up with the agent's indented output
+  const IMAGE_HEADROOM_ROWS = 2; // a tall image still leaves a row or two of text in view
+  const IMAGE_PAD_PX = 6;        // space above and below each image
+  const UNKNOWN_SIZE_ROWS = 12;  // an image whose dimensions weren't recorded
   // Only an image this fresh is pinned to the agent's current line. Older
   // ones arrive when a restarted server re-reads the transcript, and the
   // current line has nothing to do with them.
   const LIVE_WINDOW_MS = 60 * 1000;
-  const PREVIEW_MAX_PX = 360;
   const KEY_ESCAPE = 'Escape';
 
   function el(tag, className, text) {
@@ -47,7 +47,7 @@
     const boxes = new Map();     // snippet id → [{marker, decoration}]
     const imageRow = new Map();  // image id → marker (live anchor or placed)
     const chips = new Map();     // marker line → {marker, decoration, ids}
-    const gaps = new Map();      // image line → {anchor, top} markers of its inserted rows
+    const gaps = new Map();      // image line → {anchor, top, parts: [{id, rows}], rows}
     let waitingForScroll = false; // an image line is still on screen, gap not yet inserted
     const pending = new Map();   // snippet id → first seen (ms), until drawn
     const blobUrls = new Map();
@@ -133,14 +133,16 @@
       return { w: screenEl.clientWidth / term.cols, h: screenEl.clientHeight / term.rows };
     }
 
-    /** Cells wide the thumbnails take at `height` rows, from each image's shape. */
-    function chipCells(list, height, cell) {
-      let px = 0;
-      for (const item of list) {
-        const ratio = item.width && item.height ? item.width / item.height : 1;
-        px += height * cell.h * ratio + 3;
-      }
-      return Math.ceil(px / cell.w);
+    /**
+     * Rows an image needs at its own size, shrunk to fit the terminal's
+     * width and height like any picture in a conversation.
+     */
+    function rowsFor(item, cell) {
+      if (!item.width || !item.height) return UNKNOWN_SIZE_ROWS;
+      const maxW = (term.cols - IMAGE_INDENT_CELLS - 1) * cell.w;
+      const maxH = (term.rows - IMAGE_HEADROOM_ROWS) * cell.h;
+      const scale = Math.min(1, maxW / item.width, maxH / item.height);
+      return Math.max(1, Math.ceil((item.height * scale + IMAGE_PAD_PX) / cell.h));
     }
 
     /**
@@ -167,10 +169,10 @@
       return true;
     }
 
-    /** Image ids grouped by the line their marker sits on. */
+    /** Images grouped by the line their marker sits on, oldest first. */
     function imagesByLine() {
       const byLine = new Map();
-      for (const item of images) {
+      for (const item of [...images].reverse()) {
         const marker = imageRow.get(item.id);
         if (!live(marker)) continue;
         if (!byLine.has(marker.line)) byLine.set(marker.line, []);
@@ -180,21 +182,28 @@
     }
 
     /**
-     * Give every image line its own blank rows underneath. A line still on
-     * screen waits until it scrolls into scrollback (see insertBlankRows),
-     * so a thumbnail never sits over text.
+     * Give every image its own blank rows under its line, sized to the
+     * picture. A line still on screen waits until it scrolls into
+     * scrollback (see insertBlankRows), so an image never sits over text.
      */
-    function ensureGaps() {
+    function ensureGaps(cell) {
       waitingForScroll = false;
       const ybase = term.buffer.normal.baseY;
-      for (const line of [...imagesByLine().keys()].sort((a, b) => b - a)) { // bottom up: inserts don't move lines above
-        const have = gaps.get(line);
-        if (have && live(have.anchor) && have.anchor.line === line && live(have.top)) continue;
-        if (line >= ybase) { waitingForScroll = true; continue; }
-        if (!insertBlankRows(line + 1, GAP_ROWS)) continue;
+      const byLine = imagesByLine();
+      for (const line of [...byLine.keys()].sort((a, b) => b - a)) { // bottom up: inserts don't move lines above
+        let gap = gaps.get(line);
+        if (gap && !(live(gap.anchor) && gap.anchor.line === line && live(gap.top))) gap = null;
+        if (!gap && line >= ybase) { waitingForScroll = true; continue; }
+        const missing = byLine.get(line).filter((item) => !(gap && gap.parts.some((p) => p.id === item.id)));
+        if (!missing.length) continue;
+        const parts = missing.map((item) => ({ id: item.id, rows: rowsFor(item, cell) }));
+        const at = gap ? gap.top.line + gap.rows : line + 1;
+        const n = parts.reduce((sum, p) => sum + p.rows, 0);
+        if (!insertBlankRows(at, n)) continue;
+        if (gap) { gap.parts.push(...parts); gap.rows += n; continue; }
         const anchor = markerAt(line);
         const top = markerAt(line + 1);
-        if (anchor && top) gaps.set(line, { anchor, top });
+        if (anchor && top) gaps.set(line, { anchor, top, parts, rows: n });
       }
       // Re-key by current line: earlier inserts moved the gaps below them.
       const rekeyed = [...gaps.values()].filter((g) => live(g.anchor) && live(g.top));
@@ -205,19 +214,18 @@
     function redrawChips() {
       for (const chip of chips.values()) { chip.decoration.dispose(); chip.marker.dispose(); }
       chips.clear();
-      ensureGaps();
       const cell = cellSize();
       if (!cell) return;
-      for (const [line, list] of imagesByLine()) {
-        const gap = gaps.get(line);
-        if (!gap) continue;
-        const shown = list.slice(0, MAX_THUMBS).reverse(); // oldest left
-        const extra = list.length > MAX_THUMBS ? MORE_CELLS : 0;
-        const cells = Math.min(chipCells(shown, GAP_ROWS, cell) + extra, term.cols - 1);
+      ensureGaps(cell);
+      const byId = new Map(images.map((i) => [i.id, i]));
+      for (const [line, gap] of gaps) {
+        const parts = gap.parts.filter((p) => byId.has(p.id));
+        if (!parts.length) continue;
         const marker = markerAt(gap.top.line);
         if (!marker) continue;
         const decoration = term.registerDecoration({
-          marker, anchor: 'right', x: 1, width: cells, height: GAP_ROWS, layer: 'top',
+          marker, x: IMAGE_INDENT_CELLS, width: Math.max(1, term.cols - IMAGE_INDENT_CELLS - 1),
+          height: gap.rows, layer: 'top',
         });
         if (!decoration) { marker.dispose(); continue; }
         decoration.onRender((node) => {
@@ -225,40 +233,24 @@
           node.dataset.chip = '1';
           node.classList.add('im-chip');
           node.addEventListener('mousedown', (e) => e.stopPropagation());
-          for (const item of shown) node.append(thumbFor(item));
-          if (list.length > MAX_THUMBS) node.append(el('span', 'im-more', `+${list.length - MAX_THUMBS}`));
+          for (const p of parts) node.append(imageFor(byId.get(p.id), p.rows * cell.h));
         });
         chips.set(line, { marker, decoration });
       }
     }
 
-    function thumbFor(item) {
+    function imageFor(item, heightPx) {
+      const box = el('div', 'im-image');
+      box.style.height = `${heightPx}px`;
       const img = el('img', 'im-thumb');
       img.alt = item.toolName || 'image';
       img.draggable = false;
+      if (item.width) img.style.maxWidth = `min(100%, ${item.width}px)`;
       blobUrl(item).then((u) => { img.src = u; }).catch(() => img.remove());
-      img.addEventListener('mouseenter', () => showPreview(img, item));
-      img.addEventListener('mouseleave', hidePreview);
-      img.addEventListener('click', (e) => { e.stopPropagation(); hidePreview(); openLightbox(item); });
-      return img;
+      img.addEventListener('click', (e) => { e.stopPropagation(); openLightbox(item); });
+      box.append(img);
+      return box;
     }
-
-    // Hover preview
-    const preview = el('div', 'im-preview');
-    preview.hidden = true;
-    const previewImg = el('img');
-    preview.append(previewImg);
-    function showPreview(anchor, item) {
-      blobUrl(item).then((u) => {
-        previewImg.src = u;
-        const r = anchor.getBoundingClientRect();
-        preview.hidden = false;
-        const top = Math.max(4, Math.min(r.top, global.innerHeight - PREVIEW_MAX_PX - 8));
-        preview.style.top = `${top}px`;
-        preview.style.right = `${Math.max(4, global.innerWidth - r.left + 6)}px`;
-      }).catch(() => {});
-    }
-    function hidePreview() { preview.hidden = true; }
 
     // Lightbox
     const lightbox = el('div', 'im-lightbox');
@@ -297,7 +289,7 @@
     lightbox.addEventListener('click', (e) => { if (e.target === lightbox || e.target === lbImg) closeLightbox(); });
     lbCopy.addEventListener('click', () => { if (lbItem && lbItem.sourcePath) copy(lbItem.sourcePath); });
     lbOpen.addEventListener('click', () => { if (lbItem) global.open(urlFor(lbItem), '_blank'); });
-    document.body.append(preview, lightbox);
+    document.body.append(lightbox);
 
     // ── Scanning ──
     function scan(full) {
