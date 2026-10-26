@@ -259,6 +259,44 @@
       font-size: 11px; font-weight: 400; color: var(--muted);
     }
 
+    /* Root group (one per configured project folder) */
+    .root-group { margin-bottom: 32px; }
+    .root-header {
+      font-size: 16px; font-weight: 700; color: var(--fg);
+      display: flex; align-items: baseline; gap: 10px;
+      padding-bottom: 6px; margin-bottom: 14px; border-bottom: 1px solid var(--border);
+    }
+    .root-header .count { font-size: 11px; font-weight: 400; color: var(--muted); }
+    .root-header .root-path { font-size: 11px; font-weight: 400; color: var(--muted); }
+    .new-project-form select {
+      background: var(--input-bg); border: 1px solid var(--border); border-radius: 4px;
+      color: var(--fg); font-size: 12px; padding: 6px 8px; outline: none; font-family: inherit;
+    }
+
+    /* Settings → Project folders */
+    .root-row {
+      display: flex; align-items: center; gap: 6px; margin-bottom: 6px;
+    }
+    .root-row input[type="text"] {
+      background: var(--input-bg); border: 1px solid var(--border); border-radius: 4px;
+      color: var(--fg); font-size: 12px; padding: 5px 8px; outline: none; font-family: inherit;
+    }
+    .root-row input[type="text"]:focus { border-color: var(--accent); }
+    .root-row .root-label-input { width: 120px; }
+    .root-row .root-path-input { flex: 1; min-width: 200px; }
+    .root-row .root-order-btn, .root-row .root-remove-btn {
+      background: none; border: 1px solid var(--border); border-radius: 4px; cursor: pointer;
+      color: var(--muted); font-size: 12px; padding: 4px 7px; line-height: 1;
+    }
+    .root-row .root-order-btn:hover, .root-row .root-remove-btn:hover { color: var(--fg); border-color: var(--accent); }
+    .root-row .root-order-btn:disabled, .root-row .root-remove-btn:disabled { opacity: 0.3; cursor: default; }
+    .root-row .root-remove-btn:hover:not(:disabled) { color: var(--danger); border-color: var(--danger); }
+    .root-add-btn {
+      background: transparent; border: 1px dashed var(--border); border-radius: 6px;
+      color: var(--muted); font-size: 12px; padding: 5px 12px; cursor: pointer;
+    }
+    .root-add-btn:hover { color: var(--accent-hover); border-color: var(--accent); }
+
     /* Category picker dropdown */
     .cat-picker {
       position: fixed; z-index: 200;
@@ -1445,6 +1483,7 @@
       document.documentElement.classList.add('landing-page');
       let favorites = new Set();
       let projects = [];
+      let projectRoots = [];
       let catAssignments = {};
       let catOrder = [];
       let hotkeyConfig = { bindings: [], modifierClick: { modifier: 'RightShift', agentArgs: '--dangerously-skip-permissions' } };
@@ -1683,6 +1722,12 @@
                   </div>
                 </div>
                 <div>
+                  <div class="appearance-sub-label">Project folders</div>
+                  <div id="project-roots-settings"></div>
+                  <button class="root-add-btn" id="root-add-btn">+ Add folder…</button>
+                  <div class="settings-help">Each folder's immediate subfolders are listed as projects, grouped under the label. Order here is the order on this page.</div>
+                </div>
+                <div>
                   <div class="appearance-sub-label">Remote access</div>
                   <div class="settings-row">
                     <label>Password</label>
@@ -1869,7 +1914,102 @@
         el('switch-desktop-notify').classList.toggle('on', !settings.notifications || settings.notifications.desktop !== false);
         renderAgentPermissionControls();
         renderAgentLaunchOptionControls();
+        renderProjectRootsSettings();
       }
+
+      // ── Project folders (settings.projectRoots) ──
+      // The editor works on settings.projectRoots; when that is empty the
+      // server is on its env/default root, so the editor starts from the
+      // effective list the server reported.
+      function editableRoots() {
+        if (!Array.isArray(settings.projectRoots) || settings.projectRoots.length === 0) {
+          settings.projectRoots = projectRoots.map((r) => ({ label: r.label, path: r.path }));
+        }
+        return settings.projectRoots;
+      }
+
+      function renderProjectRootsSettings() {
+        const container = document.getElementById('project-roots-settings');
+        if (!container) return;
+        const roots = editableRoots();
+        container.innerHTML = roots.map((r, i) => `
+          <div class="root-row" data-index="${i}">
+            <input type="text" class="root-label-input" value="${escapeHtml(r.label || '')}" placeholder="Label" title="Group header shown on this page">
+            <input type="text" class="root-path-input" value="${escapeHtml(r.path || '')}" placeholder="Folder path" title="Folder whose subfolders are projects">
+            <button class="root-order-btn" data-dir="-1" title="Move up"${i === 0 ? ' disabled' : ''}>&#9650;</button>
+            <button class="root-order-btn" data-dir="1" title="Move down"${i === roots.length - 1 ? ' disabled' : ''}>&#9660;</button>
+            <button class="root-remove-btn" title="Remove this folder"${roots.length <= 1 ? ' disabled' : ''}>&times;</button>
+          </div>`).join('');
+      }
+
+      async function saveProjectRoots() {
+        settings.projectRoots = editableRoots()
+          .map((r) => ({ label: String(r.label || '').trim(), path: String(r.path || '').trim() }))
+          .filter((r) => r.path);
+        await fetch('/api/settings', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(settings),
+        });
+        await reloadProjects();
+        renderProjectRootsSettings();
+      }
+
+      function folderBasename(folder) {
+        return folder.split(/[\\/]/).filter(Boolean).pop() || folder;
+      }
+
+      async function addProjectRoot() {
+        let folder = null;
+        if (window.electronRemote && window.electronRemote.pickFolder) {
+          folder = await window.electronRemote.pickFolder((projectRoots[0] && projectRoots[0].path) || '');
+          if (!folder) return;
+        }
+        editableRoots().push({ label: folder ? folderBasename(folder) : '', path: folder || '' });
+        if (folder) {
+          await saveProjectRoots();
+          return;
+        }
+        // No native picker (plain browser): add an empty row to type into.
+        renderProjectRootsSettings();
+        const rows = document.querySelectorAll('#project-roots-settings .root-path-input');
+        if (rows.length) rows[rows.length - 1].focus();
+      }
+
+      document.addEventListener('click', (e) => {
+        if (e.target.closest('#root-add-btn')) { addProjectRoot(); return; }
+        const row = e.target.closest('#project-roots-settings .root-row');
+        if (!row) return;
+        const index = Number(row.dataset.index);
+        const roots = editableRoots();
+        const orderBtn = e.target.closest('.root-order-btn');
+        if (orderBtn) {
+          const target = index + Number(orderBtn.dataset.dir);
+          if (target < 0 || target >= roots.length) return;
+          [roots[index], roots[target]] = [roots[target], roots[index]];
+          saveProjectRoots();
+          return;
+        }
+        if (e.target.closest('.root-remove-btn')) {
+          if (roots.length <= 1) return;
+          roots.splice(index, 1);
+          saveProjectRoots();
+        }
+      });
+
+      document.addEventListener('change', (e) => {
+        const row = e.target.closest('#project-roots-settings .root-row');
+        if (!row) return;
+        const roots = editableRoots();
+        const root = roots[Number(row.dataset.index)];
+        if (!root) return;
+        if (e.target.classList.contains('root-label-input')) root.label = e.target.value;
+        if (e.target.classList.contains('root-path-input')) {
+          root.path = e.target.value;
+          if (!root.label.trim() && root.path.trim()) root.label = folderBasename(root.path.trim());
+        }
+        if (root.path.trim()) saveProjectRoots();
+      });
 
       function saveSettings() {
         fetch('/api/settings', {
@@ -2031,8 +2171,9 @@
         }
 
         // ── New Project button ──
-        if (e.target.closest('#new-project-btn')) {
-          showNewProjectForm();
+        const newProjectCard = e.target.closest('.new-project-card');
+        if (newProjectCard) {
+          showNewProjectForm(newProjectCard);
           return;
         }
 
@@ -2158,13 +2299,15 @@
         </div>`;
       }
 
-      const newProjectBtn = '<div class="new-project-card" id="new-project-btn"><span class="plus">+</span> New Project</div>';
+      function newProjectBtn(rootPath) {
+        return `<div class="new-project-card" data-root="${escapeHtml(rootPath || '')}"><span class="plus">+</span> New Project</div>`;
+      }
 
-      function renderSections() {
-        const container = document.getElementById('project-sections');
+      /** Category sections for one root's projects, ending with its New Project card. */
+      function renderRootSections(items, rootPath) {
         const grouped = {};
         const uncategorized = [];
-        for (const p of projects) {
+        for (const p of items) {
           const cat = catAssignments[p.cwd];
           if (cat) {
             if (!grouped[cat]) grouped[cat] = [];
@@ -2179,19 +2322,55 @@
 
         let html = '';
         for (const cat of allCats) {
-          const items = grouped[cat];
-          if (!items || items.length === 0) continue;
+          const catItems = grouped[cat];
+          if (!catItems || catItems.length === 0) continue;
           html += `<div class="category-section">
-            <div class="category-header">${escapeHtml(cat)} <span class="count">${items.length}</span></div>
-            <div class="project-grid">${items.map(renderCard).join('')}</div>
+            <div class="category-header">${escapeHtml(cat)} <span class="count">${catItems.length}</span></div>
+            <div class="project-grid">${catItems.map(renderCard).join('')}</div>
           </div>`;
         }
         const label = allCats.length > 0 ? 'Uncategorized' : 'All Projects';
-        const cards = uncategorized.map(renderCard).join('') + newProjectBtn;
+        const cards = uncategorized.map(renderCard).join('') + newProjectBtn(rootPath);
         html += `<div class="category-section">
           <div class="category-header">${label} <span class="count">${uncategorized.length}</span></div>
           <div class="project-grid">${cards}</div>
         </div>`;
+        return html;
+      }
+
+      /**
+       * One group per configured root, in configured order. A project is
+       * grouped by the root its folder lives under (rootPath from the API),
+       * never by name. With a single root the header is omitted so the page
+       * looks as it always did.
+       */
+      function renderSections() {
+        const container = document.getElementById('project-sections');
+        const roots = projectRoots.length > 0
+          ? projectRoots
+          : [{ label: 'All Projects', path: (projects[0] && projects[0].rootPath) || '' }];
+        const byRoot = new Map(roots.map((r) => [r.path, []]));
+        for (const p of projects) {
+          const bucket = byRoot.get(p.rootPath);
+          if (bucket) bucket.push(p);
+          else byRoot.set(p.rootPath, [p]);
+        }
+        if (byRoot.size <= 1) {
+          const [[rootPath, items]] = byRoot.size ? [...byRoot] : [[roots[0].path, []]];
+          container.innerHTML = renderRootSections(items, rootPath);
+          return;
+        }
+        let html = '';
+        for (const [rootPath, items] of byRoot) {
+          const root = roots.find((r) => r.path === rootPath) || { label: rootPath, path: rootPath };
+          html += `<div class="root-group" data-root="${escapeHtml(rootPath)}">
+            <div class="root-header">${escapeHtml(root.label)}
+              <span class="count">${items.length}</span>
+              <span class="root-path" title="${escapeHtml(rootPath)}">${escapeHtml(rootPath)}</span>
+            </div>
+            ${renderRootSections(items, rootPath)}
+          </div>`;
+        }
         container.innerHTML = html;
       }
 
@@ -2200,10 +2379,16 @@
         renderSections();
       }
 
-      function showNewProjectForm() {
-        const btn = document.getElementById('new-project-btn');
+      function showNewProjectForm(btn) {
         if (!btn) return;
+        const preferred = btn.dataset.root || (projectRoots[0] && projectRoots[0].path) || '';
+        const rootSelect = projectRoots.length > 1
+          ? `<select id="new-project-root" title="Create in which folder">${projectRoots.map((r) =>
+              `<option value="${escapeHtml(r.path)}"${r.path === preferred ? ' selected' : ''}>${escapeHtml(r.label)}</option>`
+            ).join('')}</select>`
+          : `<input type="hidden" id="new-project-root" value="${escapeHtml(preferred)}">`;
         btn.outerHTML = `<div class="new-project-form" id="new-project-form">
+          ${rootSelect}
           <input type="text" id="new-project-name" placeholder="Project name..." autofocus>
           <button id="new-project-create">Create</button>
           <button class="cancel-btn" id="new-project-cancel">&times;</button>
@@ -2220,11 +2405,13 @@
         const input = document.getElementById('new-project-name');
         const name = input?.value.trim();
         if (!name) return;
+        const rootEl = document.getElementById('new-project-root');
+        const root = rootEl && rootEl.value ? rootEl.value : undefined;
         try {
           const res = await fetch('/api/projects', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name }),
+            body: JSON.stringify({ name, root }),
           });
           const data = await res.json();
           if (!res.ok) {
@@ -2238,7 +2425,7 @@
             input.placeholder = data.error || 'Error';
             return;
           }
-          projects.push({ name: data.name, cwd: data.cwd });
+          projects.push({ name: data.name, cwd: data.cwd, rootLabel: data.rootLabel, rootPath: data.rootPath });
           projects.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
           render();
           window.open(makeUrl(data.cwd), '_blank');
@@ -2548,12 +2735,14 @@
 
       /** Re-fetch everything a rename/delete can touch, then re-render. */
       async function reloadProjects() {
-        const [proj, favs, cats] = await Promise.all([
+        const [proj, favs, cats, roots] = await Promise.all([
           fetch('/api/projects').then(r => r.json()),
           fetch('/api/favorites').then(r => r.json()),
           fetch('/api/categories').then(r => r.json()),
+          fetch('/api/project-roots').then(r => r.json()).catch(() => projectRoots),
         ]);
         projects = proj;
+        projectRoots = Array.isArray(roots) ? roots : projectRoots;
         favorites = new Set(favs);
         catAssignments = cats.assignments || {};
         catOrder = cats.order || [];
@@ -2742,8 +2931,10 @@
         fetch('/api/network-info').then(r => r.json()).catch(() => ({})),
         fetch('/api/auth-status').then(r => r.json()).catch(() => ({ passwordSet: false })),
         fetch('/api/agents').then(r => r.json()).catch(() => []),
-      ]).then(([proj, favs, cats, hotkeys, sett, presets, ver, net, auth, agentsResp]) => {
+        fetch('/api/project-roots').then(r => r.json()).catch(() => []),
+      ]).then(([proj, favs, cats, hotkeys, sett, presets, ver, net, auth, agentsResp, roots]) => {
         projects = proj;
+        projectRoots = Array.isArray(roots) ? roots : [];
         favorites = new Set(favs);
         catAssignments = cats.assignments || {};
         catOrder = cats.order || [];

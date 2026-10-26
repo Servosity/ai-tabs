@@ -81,7 +81,8 @@ Set these environment variables before starting, or accept the defaults:
 
 | Variable | Default | Description |
 |---|---|---|
-| `PROJECTS_ROOT` | `~/Documents/Projects` | Folder containing your project directories. Each subfolder becomes a launchable project. |
+| `PROJECTS_ROOTS` | *(unset)* | Semicolon-separated list of folders whose subfolders are launchable projects, e.g. `C:\Users\me\Work;C:\Users\me\Personal`. Each folder becomes a labelled group on the landing page (label = folder name). Only a seed: once `projectRoots` is set in `data/settings.json` (Settings → Project folders), that list wins. |
+| `PROJECTS_ROOT` | `~/Documents/Projects` | Legacy single folder containing your project directories; equivalent to a one-entry `PROJECTS_ROOTS`. |
 | `AI_TABS_SHELL` | *(auto-detected)* | Override the shell binary used for terminals. Auto-detection finds Git Bash on Windows, or uses `$SHELL` on macOS/Linux. (`CC_TABS_SHELL` still works as a legacy alias.) |
 | `AI_TABS_DEBUG` | *(off)* | Set to `1` to enable verbose debug logging to `data/debug.log` — useful when reporting a bug. (`CC_TABS_DEBUG` still works as a legacy alias; `"debug": true` in `data/settings.json` does the same without an env var.) |
 

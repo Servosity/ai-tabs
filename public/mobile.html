@@ -207,6 +207,10 @@
       font-size: 15px; font-weight: 500; color: var(--accent-hover);
     }
     .picker-item .item-star { color: var(--warning); font-size: 14px; flex-shrink: 0; }
+    .picker-root-header {
+      font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase;
+      letter-spacing: 0.04em; padding: 12px 4px 6px;
+    }
 
     /* ── Hidden ── */
     .hidden { display: none !important; }
@@ -693,17 +697,22 @@
   const $pickerSearch = document.getElementById('picker-search');
   const $pickerClose = document.getElementById('picker-close');
 
+  let projectRoots = [];
+
   async function showProjectPicker() {
     try {
-      const [projRes, favRes] = await Promise.all([
+      const [projRes, favRes, rootsRes] = await Promise.all([
         fetch('/api/projects', { headers: authHeaders() }),
         fetch('/api/favorites', { headers: authHeaders() }),
+        fetch('/api/project-roots', { headers: authHeaders() }),
       ]);
       allProjects = await projRes.json();
       favorites = new Set(await favRes.json());
+      projectRoots = rootsRes.ok ? await rootsRes.json() : [];
     } catch {
       allProjects = [];
       favorites = new Set();
+      projectRoots = [];
     }
     $pickerSearch.value = '';
     renderPickerList('');
@@ -713,25 +722,46 @@
 
   function hideProjectPicker() { $picker.classList.add('hidden'); }
 
+  function renderPickerItem(p) {
+    const star = favorites.has(p.cwd) ? '<span class="item-star">&#9733;</span>' : '';
+    return `<div class="picker-item" data-cwd="${escapeHtml(p.cwd)}">
+      ${star}<span class="item-name">${escapeHtml(p.name)}</span>
+    </div>`;
+  }
+
+  // One header per configured root, in configured order; a project belongs
+  // to the root its folder lives under. Favorites float to the top of each
+  // group. A single root gets no header.
   function renderPickerList(filter) {
     const lower = filter.toLowerCase();
-    const sorted = [...allProjects].sort((a, b) => {
+    const byFavThenName = (a, b) => {
       const aFav = favorites.has(a.cwd) ? 0 : 1;
       const bFav = favorites.has(b.cwd) ? 0 : 1;
       if (aFav !== bFav) return aFav - bFav;
       return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
-    });
-    const filtered = lower ? sorted.filter(p => p.name.toLowerCase().includes(lower)) : sorted;
+    };
+    const filtered = lower ? allProjects.filter(p => p.name.toLowerCase().includes(lower)) : allProjects;
     if (filtered.length === 0) {
       $pickerList.innerHTML = '<div class="empty-state">No matching projects</div>';
       return;
     }
-    $pickerList.innerHTML = filtered.map(p => {
-      const star = favorites.has(p.cwd) ? '<span class="item-star">&#9733;</span>' : '';
-      return `<div class="picker-item" data-cwd="${escapeHtml(p.cwd)}">
-        ${star}<span class="item-name">${escapeHtml(p.name)}</span>
-      </div>`;
-    }).join('');
+    if (projectRoots.length <= 1) {
+      $pickerList.innerHTML = [...filtered].sort(byFavThenName).map(renderPickerItem).join('');
+      return;
+    }
+    const byRoot = new Map(projectRoots.map(r => [r.path, []]));
+    for (const p of filtered) {
+      if (!byRoot.has(p.rootPath)) byRoot.set(p.rootPath, []);
+      byRoot.get(p.rootPath).push(p);
+    }
+    let html = '';
+    for (const [rootPath, items] of byRoot) {
+      if (items.length === 0) continue;
+      const root = projectRoots.find(r => r.path === rootPath);
+      html += `<div class="picker-root-header">${escapeHtml(root ? root.label : rootPath)}</div>`;
+      html += items.sort(byFavThenName).map(renderPickerItem).join('');
+    }
+    $pickerList.innerHTML = html;
   }
 
   $pickerSearch.addEventListener('input', () => renderPickerList($pickerSearch.value.trim()));

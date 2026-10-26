@@ -29,11 +29,22 @@ const { launchGuard } = require('./lib/launch-guard');
 const { apiNotFound, apiErrorHandler } = require('./lib/api-errors');
 const { PushNotifier } = require('./lib/push-notifier');
 const { StatuslineManager, ensureHookSettingsFile } = require('./lib/statusline');
+const projectRootsLib = require('./lib/project-roots');
 
 const crypto = require('crypto');
 
-const PROJECTS_ROOT = process.env.PROJECTS_ROOT || path.join(require('os').homedir(), 'Documents', 'Projects');
-const RESOLVED_PROJECTS_ROOT = path.resolve(PROJECTS_ROOT);
+function readRawSettings() {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(__dirname, 'data', 'settings.json'), 'utf8'));
+  } catch {
+    return {};
+  }
+}
+
+// Legacy single-root view: the first configured root at startup. Kept for
+// callers (and tests) that predate multi-root; everything in this file goes
+// through projectRoots() so a settings edit takes effect without a restart.
+const RESOLVED_PROJECTS_ROOT = projectRootsLib.resolveProjectRoots(readRawSettings(), process.env)[0].path;
 
 // Overridable so tests can spawn a real server without touching the live one.
 const PORT = Number(process.env.AI_TABS_PORT) || 25283;
@@ -108,19 +119,18 @@ function sanitizeProjectName(name) {
   return { ok: true, safeName };
 }
 
+/** The ordered project roots in force right now (settings.json wins over env). */
+function projectRoots() {
+  return projectRootsLib.resolveProjectRoots(readSettings(), process.env);
+}
+
 /**
- * Validate that cwd is an immediate child of the Projects root.
- * Returns { ok: true, folderPath, name } or { ok: false, error }.
+ * Validate that cwd is an immediate child of one of the project roots.
+ * Returns { ok: true, folderPath, name, root } or { ok: false, error }.
+ * `roots` defaults to the live configuration; tests pass their own.
  */
-function resolveProjectChild(cwd) {
-  if (!cwd || typeof cwd !== 'string') {
-    return { ok: false, error: 'cwd is required' };
-  }
-  const folderPath = path.resolve(cwd);
-  if (path.dirname(folderPath) !== RESOLVED_PROJECTS_ROOT) {
-    return { ok: false, error: 'Not a project folder' };
-  }
-  return { ok: true, folderPath, name: path.basename(folderPath) };
+function resolveProjectChild(cwd, roots = projectRoots()) {
+  return projectRootsLib.resolveProjectChild(cwd, roots);
 }
 
 /** Count live PTY sessions whose cwd is the folder or inside it. */
@@ -192,8 +202,10 @@ function takeRequestCommand(requestId) {
 
 // Ensure data directory exists
 fs.mkdirSync(path.join(__dirname, 'data'), { recursive: true });
-// Ensure projects root exists so /api/projects doesn't fail on fresh installs
-fs.mkdirSync(PROJECTS_ROOT, { recursive: true });
+// Ensure every project root exists so /api/projects doesn't fail on fresh installs
+for (const root of projectRoots()) {
+  try { fs.mkdirSync(root.path, { recursive: true }); } catch {}
+}
 const app = express();
 
 // Reject requests whose Host header isn't in the allowlist. MUST be the first
@@ -896,38 +908,40 @@ app.post('/api/sessions/:id/close-tab', (req, res) => {
   res.json({ ok: true, sessionId: id, tabClosed: dispatched, sessionKilled: sessionExists });
 });
 
-// API: list immediate subfolders of Projects
+// API: the configured project roots, in display order
+app.get('/api/project-roots', (req, res) => {
+  res.json(projectRoots());
+});
+
+// API: list immediate subfolders of every project root (root order, then name)
 app.get('/api/projects', (req, res) => {
   try {
-    const entries = fs.readdirSync(PROJECTS_ROOT, { withFileTypes: true });
-    const folders = entries
-      .filter(e => e.isDirectory())
-      .map(e => {
-        const cwd = path.join(PROJECTS_ROOT, e.name);
-        return {
-          name: e.name, cwd, agent: projectAgents.getAgentFor(cwd),
-          launchOptions: projectAgents.getLaunchOptionsFor(cwd),
-        };
-      })
-      .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+    const folders = projectRootsLib.listProjects(projectRoots(), (cwd) => ({
+      agent: projectAgents.getAgentFor(cwd),
+      launchOptions: projectAgents.getLaunchOptionsFor(cwd),
+    }));
     res.json(folders);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// API: create a new project folder
+// API: create a new project folder in a chosen root (default: the first)
 app.post('/api/projects', express.json(), (req, res) => {
-  const { name } = req.body || {};
+  const { name, root: rootPath } = req.body || {};
   const result = sanitizeProjectName(name);
   if (!result.ok) {
     return res.status(400).json({ error: result.error });
   }
+  const root = projectRootsLib.pickRoot(rootPath, projectRoots());
+  if (!root) {
+    return res.status(400).json({ error: 'Unknown project root' });
+  }
   const { safeName } = result;
-  const folderPath = path.join(PROJECTS_ROOT, safeName);
+  const folderPath = path.join(root.path, safeName);
 
-  // Belt-and-suspenders: ensure the resolved path stays inside PROJECTS_ROOT.
-  if (!path.resolve(folderPath).startsWith(RESOLVED_PROJECTS_ROOT + path.sep)) {
+  // Belt-and-suspenders: ensure the resolved path stays inside the root.
+  if (!path.resolve(folderPath).startsWith(root.path + path.sep)) {
     return res.status(400).json({ error: 'Invalid folder name' });
   }
 
@@ -936,7 +950,7 @@ app.post('/api/projects', express.json(), (req, res) => {
       return res.status(409).json({ error: 'Folder already exists', cwd: folderPath });
     }
     fs.mkdirSync(folderPath, { recursive: true });
-    res.json({ name: safeName, cwd: folderPath });
+    res.json({ name: safeName, cwd: folderPath, rootLabel: root.label, rootPath: root.path });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -952,7 +966,8 @@ app.patch('/api/projects', express.json(), (req, res) => {
   }
   const nameResult = sanitizeProjectName(newName);
   if (!nameResult.ok) return res.status(400).json({ error: nameResult.error });
-  const newPath = path.join(RESOLVED_PROJECTS_ROOT, nameResult.safeName);
+  // A rename never moves a folder between roots.
+  const newPath = path.join(src.root.path, nameResult.safeName);
   if (newPath === src.folderPath) {
     return res.json({ ok: true, name: nameResult.safeName, cwd: newPath });
   }
@@ -1412,7 +1427,7 @@ function startServer() {
   });
 }
 
-module.exports = { startServer, setTabOpener, setOnSettingsChanged, ptyManager, PORT, pushNotifier, sanitizeProjectName, resolveProjectChild, RESOLVED_PROJECTS_ROOT, buildAgentCommand, buildOpenTabMessage, serializeAgent, pickDisplayIps };
+module.exports = { startServer, setTabOpener, setOnSettingsChanged, ptyManager, PORT, pushNotifier, sanitizeProjectName, resolveProjectChild, projectRoots, RESOLVED_PROJECTS_ROOT, buildAgentCommand, buildOpenTabMessage, serializeAgent, pickDisplayIps };
 
 if (require.main === module) {
   // Last line of defense: the detached server holds every live session, so a

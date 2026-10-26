@@ -1466,6 +1466,25 @@ ipcMain.handle('clipboard-write', (e, text) => {
   return { ok: true };
 });
 
+// Native folder picker for Settings → Project folders. Returns the chosen
+// absolute path or null when cancelled.
+ipcMain.handle('pick-folder', async (e, defaultPath) => {
+  if (!isTrustedSender(e)) return null;
+  // Tabs are WebContentsViews inside a BaseWindow, so look the owner up
+  // through our own window table rather than BrowserWindow.fromWebContents.
+  let owner = null;
+  for (const state of windows.values()) {
+    if (state.tabs.some((t) => t.view.webContents.id === e.sender.id)) { owner = state.win; break; }
+  }
+  const result = await dialog.showOpenDialog(owner, {
+    title: 'Choose a project folder',
+    properties: ['openDirectory'],
+    ...(typeof defaultPath === 'string' && defaultPath ? { defaultPath } : {}),
+  });
+  if (result.canceled || !result.filePaths || !result.filePaths[0]) return null;
+  return result.filePaths[0];
+});
+
 ipcMain.handle('tab-bar-expand', (e) => {
   const state = findStateByWebContentsId(e.sender.id);
   if (!state || state.win.isDestroyed()) return;
@@ -1937,8 +1956,8 @@ app.whenReady().then(async () => {
 
   createGhostWindow();
   const state = createWindow({ ...savedWindowBounds(), show: false });
-  const projectsRoot = process.env.PROJECTS_ROOT || path.join(require('os').homedir(), 'Documents', 'Projects');
-  createTab(state, BASE_URL, path.basename(projectsRoot), true, false, false, true);
+  const firstRoot = require('./lib/project-roots').resolveProjectRoots(readSettings(), process.env)[0];
+  createTab(state, BASE_URL, firstRoot.label, true, false, false, true);
 
   // Show window once tab bar is painted (local file, near-instant)
   state.tabBarView.webContents.once('did-finish-load', () => {
