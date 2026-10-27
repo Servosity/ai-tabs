@@ -179,18 +179,24 @@
     /**
      * Move a Read's image that has no rows yet to the Read line above its
      * pinned row: the row it was pinned to when it arrived may since hold
-     * other text (inline-match.js readRowAbove).
+     * other text (inline-match.js readRowFor).
      */
     function reanchorReads() {
       const placed = new Set();
-      for (const g of gaps.values()) for (const p of g.parts) placed.add(p.id);
+      const claimed = new Set(); // Read rows that already hold an image
+      for (const g of gaps.values()) {
+        for (const p of g.parts) placed.add(p.id);
+        if (live(g.anchor)) claimed.add(g.anchor.line);
+      }
       let rows = null;
-      for (const item of images) {
+      for (const item of [...images].reverse()) { // oldest first: each takes the Read line nearest it
         const marker = imageRow.get(item.id);
         if (item.toolName !== 'Read' || placed.has(item.id) || !live(marker)) continue;
         rows = rows || bufferRows();
-        const r = match.readRowAbove(rows, marker.line);
-        if (r < 0 || r === marker.line) continue;
+        const r = match.readRowFor(rows, marker.line, claimed);
+        if (r < 0) continue;
+        claimed.add(r);
+        if (r === marker.line) continue;
         const moved = markerAt(r);
         if (!moved) continue;
         marker.dispose();

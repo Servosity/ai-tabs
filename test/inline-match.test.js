@@ -1,7 +1,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 
-const { normalize, findBlocks, liveActivityRow, placeImages, readRowAbove } = require('../public/inline-match');
+const { normalize, findBlocks, liveActivityRow, placeImages, readRowFor } = require('../public/inline-match');
 
 // Rows as Claude Code 2.1.308 drew a reply at 100 columns (native scrollback):
 // a quote prefixed "▎" and hard-wrapped, then a code block indented with no fences.
@@ -74,22 +74,24 @@ test('replayed images pair with paste and MCP rows newest-first, and a Read only
   assert.deepEqual([...placed], [['shot2', 3], ['shot1', 1], ['icon', 2], ['paste', 0]]);
 });
 
-test('readRowAbove finds the Read line over text drawn after the image arrived', () => {
+test('readRowFor finds the Read line an image belongs under', () => {
   const rows = [
-    '● Bash(python mock.py)',
+    '  Read 1 file (ctrl+o to expand)',          // 0: an earlier Read
+    '',
+    '● Bash(python mock.py)',                   // 2: pinned here: its Read was not drawn yet
     '  ⎿  ok',
     '',
-    '  Read 1 file (ctrl+o to expand)',
+    '  Read 1 file (ctrl+o to expand)',          // 5: its Read
     '',
-    '● Above is mockup 4. It works like the approved Load screen: the grid is',
-    '  enlarged 20% both ways to fill the space between, keeping its shape.',
-    '● Read(C:\proj\shot.png)',
-    '  and more text',
+    '● Above is mockup 4. It works like the',   // 7
+    '  approved Load screen.',                   // 8: pinned here: the reply came after
   ];
-  assert.equal(readRowAbove(rows, 6), 3);  // pinned inside the reply: back up to the collapsed Read
-  assert.equal(readRowAbove(rows, 8), 7);  // a Read with its path
-  assert.equal(readRowAbove(rows, 3), 3);  // already on it
-  assert.equal(readRowAbove(rows, 1), -1); // no Read above
-  assert.equal(readRowAbove(['  Read 2 files (ctrl+o to expand)'], 0), 0);
-  assert.equal(readRowAbove(['  Already read the file'], 0), -1);
+  assert.equal(readRowFor(rows, 2), 5);                 // the Read line drawn just below, not the earlier one
+  assert.equal(readRowFor(rows, 8), 5);                 // the reply's own Read, above
+  assert.equal(readRowFor(rows, 8, new Set([5])), 0);   // that one holds another image: the next above
+  assert.equal(readRowFor(rows, 5), 5);                 // already on it
+  assert.equal(readRowFor(['  ⎿  ok', '● Done.'], 1), -1);
+  assert.equal(readRowFor(['  Read 2 files (ctrl+o to expand)'], 0), 0);
+  assert.equal(readRowFor(['● Read(C:\proj\shot.png)'], 0), 0);
+  assert.equal(readRowFor(['  Already read the file'], 0), -1);
 });

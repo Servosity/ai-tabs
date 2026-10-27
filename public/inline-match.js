@@ -25,7 +25,8 @@
   const READ_CALL_RE = /\bRead\(/;
   // The line a Read draws: "Read(path)", or Claude Code's collapsed "Read 1 file (ctrl+o to expand)".
   const READ_ROW_RE = /^\s*(?:[●⏺]\s*)?Read(?:\(|\s+\d+\s+files?\b)/;
-  const READ_ROW_MAX_UP = 80; // how far above its pinned row an image's Read line may be
+  const READ_ROW_MAX_UP = 80;  // how far above its pinned row an image's Read line may be
+  const READ_ROW_MAX_DOWN = 8; // and below: the image can arrive before its Read line is drawn
   const SPINNER_RE = /^\s*[✻✶✽✢·*]\s/;
   const INPUT_RULE_RE = /^─{8,}/;
   const INPUT_BOX_MAX_ROWS = 6; // rows between the input box's two rules, at most
@@ -117,21 +118,28 @@
   }
 
   /**
-   * The Read line an image belongs under: the nearest row at or above
-   * `row` that a Read drew, within READ_ROW_MAX_UP rows; -1 when none.
-   * An image is pinned to the agent's bottom row when it arrives, and the
-   * agent may later draw other text on that row (the reply that follows).
+   * The Read line an image belongs under; -1 when none. An image is pinned
+   * to the agent's bottom row when it arrives, which is usually just before
+   * its Read line is drawn (so the line is a few rows below), but the agent
+   * may also draw other text on that row later (so the line is above). The
+   * first Read row within READ_ROW_MAX_DOWN rows below, else the nearest
+   * within READ_ROW_MAX_UP above; rows in `claimed` hold another image.
    * @param {string[]} rows
    * @param {number} row
+   * @param {Set<number>} [claimed]
    */
-  function readRowAbove(rows, row) {
-    for (let r = Math.min(row, rows.length - 1); r >= 0 && r >= row - READ_ROW_MAX_UP; r--) {
-      if (READ_ROW_RE.test(rows[r])) return r;
+  function readRowFor(rows, row, claimed) {
+    const free = (r) => READ_ROW_RE.test(rows[r]) && !(claimed && claimed.has(r));
+    for (let r = Math.max(row, 0); r < rows.length && r <= row + READ_ROW_MAX_DOWN; r++) {
+      if (free(r)) return r;
+    }
+    for (let r = Math.min(row, rows.length) - 1; r >= 0 && r >= row - READ_ROW_MAX_UP; r--) {
+      if (free(r)) return r;
     }
     return -1;
   }
 
-  const api = { normalize, findBlocks, liveActivityRow, placeImages, readRowAbove };
+  const api = { normalize, findBlocks, liveActivityRow, placeImages, readRowFor };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   if (global) global.InlineMatch = api;
 })(typeof window !== 'undefined' ? window : null);
