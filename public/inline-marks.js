@@ -42,6 +42,9 @@
     const fetchFn = opts.fetch || ((url, init) => global.fetch(url, init));
     const match = global.InlineMatch;
     const overlay = global.TermOverlay.create(term);
+    const floating = global.InlinePending
+      ? global.InlinePending.create({ term, imageUrl: (item) => blobUrl(item), open: (item) => openLightbox(item), focusTerminal })
+      : { show() {} };
 
     let sessionId = null;
     let snippets = [];           // newest first
@@ -187,10 +190,11 @@
       waitingForScroll = false;
       const ybase = term.buffer.normal.baseY;
       const byLine = imagesByLine();
+      const waiting = [];
       for (const line of [...byLine.keys()].sort((a, b) => b - a)) { // bottom up: inserts don't move lines above
         let gap = gaps.get(line);
         if (gap && !(live(gap.anchor) && gap.anchor.line === line && live(gap.top))) gap = null;
-        if (!gap && line >= ybase) { waitingForScroll = true; continue; }
+        if (!gap && line >= ybase) { waitingForScroll = true; waiting.push(...byLine.get(line)); continue; }
         const missing = byLine.get(line).filter((item) => !(gap && gap.parts.some((p) => p.id === item.id)));
         if (!missing.length) continue;
         const parts = missing.map((item) => ({ id: item.id, rows: rowsFor(item, cell) }));
@@ -206,6 +210,8 @@
       const rekeyed = [...gaps.values()].filter((g) => live(g.anchor) && live(g.top));
       gaps.clear();
       for (const g of rekeyed) gaps.set(g.anchor.line, g);
+      // Still on screen: shown floating until its rows exist (public/inline-pending.js).
+      floating.show(waiting.sort((a, b) => (b.at || 0) - (a.at || 0)));
     }
 
     function redrawChips() {
@@ -324,6 +330,7 @@
         // The buffer is being rewritten, inserted rows and all.
         for (const g of gaps.values()) { g.anchor.dispose(); g.top.dispose(); }
         gaps.clear();
+        floating.show([]);
       }
     }
 

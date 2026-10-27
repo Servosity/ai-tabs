@@ -70,3 +70,20 @@
 }
 .im-lb-bar button:hover { border-color: var(--accent, #9d7ee0); color: #fff; }
 .im-lb-bar button[hidden] { display: none; }
+
+/* An image whose line is still on screen (public/inline-pending.js): over
+   the top right of the terminal until its own rows exist. */
+.ip-panel {
+  position: absolute; top: 6px; right: 14px; z-index: 9; max-width: 55%; max-height: 85%;
+  display: flex; box-sizing: border-box; padding: 4px; border-radius: 6px;
+  background: var(--sl-bar-bg, #1c1c2e); border: 1px solid var(--accent, #9d7ee0);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.5);
+}
+.ip-panel[hidden] { display: none; }
+.ip-image { max-width: 100%; max-height: 100%; min-height: 0; object-fit: contain; cursor: zoom-in; border-radius: 4px; }
+.ip-close {
+  position: absolute; top: 6px; right: 6px; width: 24px; height: 24px; padding: 0;
+  border: none; border-radius: 12px; background: rgba(0, 0, 0, 0.65); color: #fff;
+  font: 16px/24px -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; cursor: pointer;
+}
+.ip-close:hover { background: var(--accent, #9d7ee0); }
