@@ -530,7 +530,6 @@
   <script src="/sl-rate-limits.js"></script>
   <script src="/inline-match.js"></script>
   <script src="/term-overlay.js"></script>
-  <script src="/inline-pending.js"></script>
   <script src="/inline-marks.js"></script>
   <script>
     // Register service worker (required for PWA installability)
@@ -1351,6 +1350,8 @@
                 // desktop notification can say what happened.
                 window._attentionReason = msg.reason || null;
                 markIdle();
+                // The agent stopped drawing: an image still on screen can get its rows now.
+                if (inlineMarks && msg.type === 'idle') inlineMarks.settled();
                 break;
               case 'statusline':
                 slStats = msg.stats;

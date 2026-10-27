@@ -11,11 +11,14 @@
  *   marks.pushSnippet(item)     on {type:'snippet'}
  *   marks.pushImage(item)       on {type:'media'}
  *   marks.removeImage(id)       on {type:'media-removed'}
+ *   marks.settled()             on {type:'idle'}: images still on screen get their rows
  */
 (function (global) {
   'use strict';
 
   const SCAN_DEBOUNCE_MS = 400;
+  // The Stop hook can beat the reply's last rows to the screen: settle after them.
+  const SETTLE_DELAY_MS = 700;
   const PENDING_TTL_MS = 60 * 1000;
   const COPIED_MS = 1200;
   const IMAGE_INDENT_CELLS = 2;  // lines up with the agent's indented output
@@ -42,9 +45,6 @@
     const fetchFn = opts.fetch || ((url, init) => global.fetch(url, init));
     const match = global.InlineMatch;
     const overlay = global.TermOverlay.create(term);
-    const floating = global.InlinePending
-      ? global.InlinePending.create({ term, imageUrl: (item) => blobUrl(item), open: (item) => openLightbox(item), focusTerminal })
-      : { show() {} };
 
     let sessionId = null;
     let snippets = [];           // newest first
@@ -146,17 +146,22 @@
     }
 
     /**
-     * Splice `n` blank rows into the buffer at absolute row `at`. Only rows
-     * already in scrollback: the agent can't address those any more, so
-     * growing them never desyncs its cursor. Markers below shift on their
-     * own (xterm listens to the line list's insert/trim events). Uses xterm
-     * internals; returns false if they're not there.
+     * Splice `n` blank rows into the buffer at absolute row `at`. Rows in
+     * scrollback can always grow: the agent can't address those any more.
+     * With `onScreen`, `at` may also be on screen, above the cursor's row:
+     * the rows above `at` scroll up by `n` and every row from `at` down
+     * keeps its place on screen, so the agent's cursor-relative redraws of
+     * what is under it (its input box) still land right. Only safe while
+     * the agent is idle: it isn't redrawing anything above its input box.
+     * Markers below shift on their own (xterm listens to the line list's
+     * insert/trim events). Uses xterm internals; returns false if they're
+     * not there.
      */
-    function insertBlankRows(at, n) {
+    function insertBlankRows(at, n, onScreen) {
       const core = term._core;
       const buf = core && core.buffers && core.buffers.normal;
       if (!buf || !buf.lines || typeof buf.getBlankLine !== 'function') return false;
-      if (at > buf.ybase) return false;
+      if (at > buf.ybase && !(onScreen && at <= buf.ybase + buf.y)) return false;
       const atBottom = buf.ydisp === buf.ybase;
       const before = buf.lines.length;
       const blanks = [];
@@ -166,6 +171,7 @@
       buf.ybase += n - trimmed;
       buf.ydisp = atBottom ? buf.ybase : Math.max(0, buf.ydisp + (buf.ydisp >= at ? n : 0) - trimmed);
       if (core.viewport) core.viewport.syncScrollArea(true);
+      term.refresh(0, term.rows - 1);
       return true;
     }
 
@@ -184,23 +190,23 @@
     /**
      * Give every image its own blank rows under its line, sized to the
      * picture. A line still on screen waits until it scrolls into
-     * scrollback (see insertBlankRows), so an image never sits over text.
+     * scrollback or the agent goes idle (see insertBlankRows), so an image
+     * never sits over text.
      */
-    function ensureGaps(cell) {
+    function ensureGaps(cell, onScreenOk) {
       waitingForScroll = false;
       const ybase = term.buffer.normal.baseY;
       const byLine = imagesByLine();
-      const waiting = [];
       for (const line of [...byLine.keys()].sort((a, b) => b - a)) { // bottom up: inserts don't move lines above
         let gap = gaps.get(line);
         if (gap && !(live(gap.anchor) && gap.anchor.line === line && live(gap.top))) gap = null;
-        if (!gap && line >= ybase) { waitingForScroll = true; waiting.push(...byLine.get(line)); continue; }
+        if (!gap && line >= ybase && !onScreenOk) { waitingForScroll = true; continue; }
         const missing = byLine.get(line).filter((item) => !(gap && gap.parts.some((p) => p.id === item.id)));
         if (!missing.length) continue;
         const parts = missing.map((item) => ({ id: item.id, rows: rowsFor(item, cell) }));
         const at = gap ? gap.top.line + gap.rows : line + 1;
         const n = parts.reduce((sum, p) => sum + p.rows, 0);
-        if (!insertBlankRows(at, n)) continue;
+        if (!insertBlankRows(at, n, onScreenOk)) continue;
         if (gap) { gap.parts.push(...parts); gap.rows += n; continue; }
         const anchor = markerAt(line);
         const top = markerAt(line + 1);
@@ -210,16 +216,14 @@
       const rekeyed = [...gaps.values()].filter((g) => live(g.anchor) && live(g.top));
       gaps.clear();
       for (const g of rekeyed) gaps.set(g.anchor.line, g);
-      // Still on screen: shown floating until its rows exist (public/inline-pending.js).
-      floating.show(waiting.sort((a, b) => (b.at || 0) - (a.at || 0)));
     }
 
-    function redrawChips() {
+    function redrawChips(onScreenOk) {
       for (const chip of chips.values()) { chip.mark.dispose(); chip.marker.dispose(); }
       chips.clear();
       const cell = cellSize();
       if (!cell) return;
-      ensureGaps(cell);
+      ensureGaps(cell, onScreenOk);
       const byId = new Map(images.map((i) => [i.id, i]));
       for (const [line, gap] of gaps) {
         const parts = gap.parts.filter((p) => byId.has(p.id));
@@ -291,7 +295,7 @@
     document.body.append(lightbox);
 
     // ── Scanning ──
-    function scan(full) {
+    function scan(full, onScreenOk) {
       if (!match || term.buffer.active.type !== 'normal') return;
       const rows = bufferRows();
       const now = Date.now();
@@ -305,7 +309,7 @@
           if (marker) imageRow.set(id, marker);
         }
       }
-      redrawChips();
+      redrawChips(onScreenOk);
       overlay.render();
     }
     function scheduleScan(full) {
@@ -330,7 +334,6 @@
         // The buffer is being rewritten, inserted rows and all.
         for (const g of gaps.values()) { g.anchor.dispose(); g.top.dispose(); }
         gaps.clear();
-        floating.show([]);
       }
     }
 
@@ -396,7 +399,15 @@
       scheduleScan(false);
     }
 
-    return { attach, pushSnippet, pushImage, removeImage };
+    /** The agent went idle: images still on screen get their rows now. */
+    function settled() {
+      clearTimeout(scanTimer);
+      scanTimer = setTimeout(() => {
+        if (waitingForScroll) term.write('', () => scan(true, true));
+      }, SETTLE_DELAY_MS);
+    }
+
+    return { attach, pushSnippet, pushImage, removeImage, settled };
   }
 
   const api = { create };
