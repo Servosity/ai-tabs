@@ -25,6 +25,7 @@
   const IMAGE_HEADROOM_ROWS = 2; // a tall image still leaves a row or two of text in view
   const IMAGE_PAD_PX = 6;        // space above and below each image
   const UNKNOWN_SIZE_ROWS = 12;  // an image whose dimensions weren't recorded
+  const INLINE_SHARE = 0.33;     // inline, an image is drawn at this share of its fitted size; a click shows it whole
   // Only an image this fresh is pinned to the agent's current line. Older
   // ones arrive when a restarted server re-reads the transcript, and the
   // current line has nothing to do with them.
@@ -134,14 +135,14 @@
     }
 
     /**
-     * Rows an image needs at its own size, shrunk to fit the terminal's
-     * width and height like any picture in a conversation.
+     * Rows an image needs: its own size shrunk to fit the terminal's width
+     * and height, then to INLINE_SHARE of that (a click shows it whole).
      */
     function rowsFor(item, cell) {
       if (!item.width || !item.height) return UNKNOWN_SIZE_ROWS;
       const maxW = (term.cols - IMAGE_INDENT_CELLS - 1) * cell.w;
       const maxH = (term.rows - IMAGE_HEADROOM_ROWS) * cell.h;
-      const scale = Math.min(1, maxW / item.width, maxH / item.height);
+      const scale = Math.min(1, maxW / item.width, maxH / item.height) * INLINE_SHARE;
       return Math.max(1, Math.ceil((item.height * scale + IMAGE_PAD_PX) / cell.h));
     }
 
