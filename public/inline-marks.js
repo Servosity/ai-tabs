@@ -176,6 +176,28 @@
       return true;
     }
 
+    /**
+     * Move a Read's image that has no rows yet to the Read line above its
+     * pinned row: the row it was pinned to when it arrived may since hold
+     * other text (inline-match.js readRowAbove).
+     */
+    function reanchorReads() {
+      const placed = new Set();
+      for (const g of gaps.values()) for (const p of g.parts) placed.add(p.id);
+      let rows = null;
+      for (const item of images) {
+        const marker = imageRow.get(item.id);
+        if (item.toolName !== 'Read' || placed.has(item.id) || !live(marker)) continue;
+        rows = rows || bufferRows();
+        const r = match.readRowAbove(rows, marker.line);
+        if (r < 0 || r === marker.line) continue;
+        const moved = markerAt(r);
+        if (!moved) continue;
+        marker.dispose();
+        imageRow.set(item.id, moved);
+      }
+    }
+
     /** Images grouped by the line their marker sits on, oldest first. */
     function imagesByLine() {
       const byLine = new Map();
@@ -196,6 +218,7 @@
      */
     function ensureGaps(cell, onScreenOk) {
       waitingForScroll = false;
+      reanchorReads();
       const ybase = term.buffer.normal.baseY;
       const byLine = imagesByLine();
       for (const line of [...byLine.keys()].sort((a, b) => b - a)) { // bottom up: inserts don't move lines above

@@ -1,7 +1,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 
-const { normalize, findBlocks, liveActivityRow, placeImages } = require('../public/inline-match');
+const { normalize, findBlocks, liveActivityRow, placeImages, readRowAbove } = require('../public/inline-match');
 
 // Rows as Claude Code 2.1.308 drew a reply at 100 columns (native scrollback):
 // a quote prefixed "▎" and hard-wrapped, then a code block indented with no fences.
@@ -72,4 +72,24 @@ test('replayed images pair with paste and MCP rows newest-first, and a Read only
     { id: 'paste', toolName: 'paste' },
   ]);
   assert.deepEqual([...placed], [['shot2', 3], ['shot1', 1], ['icon', 2], ['paste', 0]]);
+});
+
+test('readRowAbove finds the Read line over text drawn after the image arrived', () => {
+  const rows = [
+    '● Bash(python mock.py)',
+    '  ⎿  ok',
+    '',
+    '  Read 1 file (ctrl+o to expand)',
+    '',
+    '● Above is mockup 4. It works like the approved Load screen: the grid is',
+    '  enlarged 20% both ways to fill the space between, keeping its shape.',
+    '● Read(C:\proj\shot.png)',
+    '  and more text',
+  ];
+  assert.equal(readRowAbove(rows, 6), 3);  // pinned inside the reply: back up to the collapsed Read
+  assert.equal(readRowAbove(rows, 8), 7);  // a Read with its path
+  assert.equal(readRowAbove(rows, 3), 3);  // already on it
+  assert.equal(readRowAbove(rows, 1), -1); // no Read above
+  assert.equal(readRowAbove(['  Read 2 files (ctrl+o to expand)'], 0), 0);
+  assert.equal(readRowAbove(['  Already read the file'], 0), -1);
 });

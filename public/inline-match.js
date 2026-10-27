@@ -23,6 +23,9 @@
   const PASTE_RE = /\[Image #\d+\]/;
   const MCP_RE = /\(MCP\)/;
   const READ_CALL_RE = /\bRead\(/;
+  // The line a Read draws: "Read(path)", or Claude Code's collapsed "Read 1 file (ctrl+o to expand)".
+  const READ_ROW_RE = /^\s*(?:[●⏺]\s*)?Read(?:\(|\s+\d+\s+files?\b)/;
+  const READ_ROW_MAX_UP = 80; // how far above its pinned row an image's Read line may be
   const SPINNER_RE = /^\s*[✻✶✽✢·*]\s/;
   const INPUT_RULE_RE = /^─{8,}/;
   const INPUT_BOX_MAX_ROWS = 6; // rows between the input box's two rules, at most
@@ -113,7 +116,22 @@
     return placed;
   }
 
-  const api = { normalize, findBlocks, liveActivityRow, placeImages };
+  /**
+   * The Read line an image belongs under: the nearest row at or above
+   * `row` that a Read drew, within READ_ROW_MAX_UP rows; -1 when none.
+   * An image is pinned to the agent's bottom row when it arrives, and the
+   * agent may later draw other text on that row (the reply that follows).
+   * @param {string[]} rows
+   * @param {number} row
+   */
+  function readRowAbove(rows, row) {
+    for (let r = Math.min(row, rows.length - 1); r >= 0 && r >= row - READ_ROW_MAX_UP; r--) {
+      if (READ_ROW_RE.test(rows[r])) return r;
+    }
+    return -1;
+  }
+
+  const api = { normalize, findBlocks, liveActivityRow, placeImages, readRowAbove };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   if (global) global.InlineMatch = api;
 })(typeof window !== 'undefined' ? window : null);
