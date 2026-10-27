@@ -1,8 +1,9 @@
 /**
  * Inline marks — click-to-copy boxes over the code blocks and quotes the
  * agent wrote, and the images themselves in blank rows inserted under the
- * line where each image happened, drawn in the terminal itself as xterm decorations so they scroll with the
- * text. Positions come from public/inline-match.js.
+ * line where each image happened. Both are drawn on the terminal's overlay
+ * (public/term-overlay.js) so they scroll with the text; positions come
+ * from public/inline-match.js.
  *
  * Usage (index.html, terminal mode):
  *   const marks = InlineMarks.create({ term, copy, focusTerminal });
@@ -40,13 +41,14 @@
     const focusTerminal = opts.focusTerminal || (() => {});
     const fetchFn = opts.fetch || ((url, init) => global.fetch(url, init));
     const match = global.InlineMatch;
+    const overlay = global.TermOverlay.create(term);
 
     let sessionId = null;
     let snippets = [];           // newest first
     let images = [];             // newest first
-    const boxes = new Map();     // snippet id → [{marker, decoration}]
+    const boxes = new Map();     // snippet id → [{marker, mark}]
     const imageRow = new Map();  // image id → marker (live anchor or placed)
-    const chips = new Map();     // marker line → {marker, decoration, ids}
+    const chips = new Map();     // marker line → {marker, mark}
     const gaps = new Map();      // image line → {anchor, top, parts: [{id, rows}], rows}
     let waitingForScroll = false; // an image line is still on screen, gap not yet inserted
     const pending = new Map();   // snippet id → first seen (ms), until drawn
@@ -73,30 +75,25 @@
     function drawBox(item, range) {
       const marker = markerAt(range.start);
       if (!marker) return null;
-      const decoration = term.registerDecoration({
-        marker, x: 0, width: term.cols, height: range.end - range.start + 1, layer: 'top',
-      });
-      if (!decoration) { marker.dispose(); return null; }
+      const mark = overlay.add({ marker, x: 0, width: term.cols, height: range.end - range.start + 1 });
+      if (!mark) { marker.dispose(); return null; }
       let timer = null;
-      decoration.onRender((node) => {
-        if (node.dataset.snippet) return;
-        node.dataset.snippet = item.id;
-        node.classList.add('im-box', item.kind === 'quote' ? 'im-quote' : 'im-code');
-        node.title = 'Click to copy';
-        const tag = el('span', 'im-tag', 'copy');
-        node.append(tag);
-        node.addEventListener('mousedown', (e) => e.stopPropagation());
-        node.addEventListener('click', async (e) => {
-          e.stopPropagation();
-          const ok = await copy(item.text);
-          tag.textContent = ok ? 'copied' : 'copy failed';
-          node.classList.toggle('im-copied', ok);
-          clearTimeout(timer);
-          timer = setTimeout(() => { tag.textContent = 'copy'; node.classList.remove('im-copied'); }, COPIED_MS);
-          focusTerminal();
-        });
+      const node = mark.element;
+      node.classList.add('im-box', item.kind === 'quote' ? 'im-quote' : 'im-code');
+      node.title = 'Click to copy';
+      const tag = el('span', 'im-tag', 'copy');
+      node.append(tag);
+      node.addEventListener('mousedown', (e) => e.stopPropagation());
+      node.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const ok = await copy(item.text);
+        tag.textContent = ok ? 'copied' : 'copy failed';
+        node.classList.toggle('im-copied', ok);
+        clearTimeout(timer);
+        timer = setTimeout(() => { tag.textContent = 'copy'; node.classList.remove('im-copied'); }, COPIED_MS);
+        focusTerminal();
       });
-      return { marker, decoration };
+      return { marker, mark };
     }
 
     function placeSnippets(rows, list) {
@@ -212,7 +209,7 @@
     }
 
     function redrawChips() {
-      for (const chip of chips.values()) { chip.decoration.dispose(); chip.marker.dispose(); }
+      for (const chip of chips.values()) { chip.mark.dispose(); chip.marker.dispose(); }
       chips.clear();
       const cell = cellSize();
       if (!cell) return;
@@ -223,19 +220,15 @@
         if (!parts.length) continue;
         const marker = markerAt(gap.top.line);
         if (!marker) continue;
-        const decoration = term.registerDecoration({
-          marker, x: IMAGE_INDENT_CELLS, width: Math.max(1, term.cols - IMAGE_INDENT_CELLS - 1),
-          height: gap.rows, layer: 'top',
+        const mark = overlay.add({
+          marker, x: IMAGE_INDENT_CELLS, width: Math.max(1, term.cols - IMAGE_INDENT_CELLS - 1), height: gap.rows,
         });
-        if (!decoration) { marker.dispose(); continue; }
-        decoration.onRender((node) => {
-          if (node.dataset.chip) return;
-          node.dataset.chip = '1';
-          node.classList.add('im-chip');
-          node.addEventListener('mousedown', (e) => e.stopPropagation());
-          for (const p of parts) node.append(imageFor(byId.get(p.id), p.rows * cell.h));
-        });
-        chips.set(line, { marker, decoration });
+        if (!mark) { marker.dispose(); continue; }
+        const node = mark.element;
+        node.classList.add('im-chip');
+        node.addEventListener('mousedown', (e) => e.stopPropagation());
+        for (const p of parts) node.append(imageFor(byId.get(p.id), p.rows * cell.h));
+        chips.set(line, { marker, mark });
       }
     }
 
@@ -307,8 +300,7 @@
         }
       }
       redrawChips();
-      // Decorations draw on the next repaint; an idle terminal has none due.
-      term.refresh(0, term.rows - 1);
+      overlay.render();
     }
     function scheduleScan(full) {
       clearTimeout(scanTimer);
@@ -322,9 +314,9 @@
     term.onResize(() => { clearAll(false); scheduleScan(true); });
 
     function clearAll(dropImages) {
-      for (const list of boxes.values()) for (const b of list) { b.decoration.dispose(); b.marker.dispose(); }
+      for (const list of boxes.values()) for (const b of list) { b.mark.dispose(); b.marker.dispose(); }
       boxes.clear();
-      for (const chip of chips.values()) { chip.decoration.dispose(); chip.marker.dispose(); }
+      for (const chip of chips.values()) { chip.mark.dispose(); chip.marker.dispose(); }
       chips.clear();
       if (dropImages) {
         for (const m of imageRow.values()) m.dispose();

@@ -1,23 +1,29 @@
 /* Inline marks (public/inline-marks.js): copy boxes over the agent's code
    blocks and quotes, and images in blank rows inserted under the line they
    came from.
-   Both are xterm decorations, so they scroll with the text. */
+   Both live on the terminal overlay (public/term-overlay.js), so they scroll
+   with the text. */
 
-.xterm-decoration.im-box {
+/* Above the text and xterm's own decorations; clipped to the screen so a
+   box half scrolled off doesn't spill over the tab bar. */
+.to-layer { position: absolute; inset: 0; overflow: hidden; pointer-events: none; z-index: 8; }
+.to-mark { position: absolute; }
+
+.to-mark.im-box {
   pointer-events: auto; cursor: copy; box-sizing: border-box;
   border: 1px solid transparent; border-radius: 4px;
   background: transparent;
 }
-.xterm-decoration.im-box:hover {
+.to-mark.im-box:hover {
   border-color: var(--accent, #9d7ee0);
   background: color-mix(in srgb, var(--accent, #9d7ee0) 8%, transparent);
 }
-.xterm-decoration.im-box.im-copied {
+.to-mark.im-box.im-copied {
   border-color: var(--success, #4caf50);
   background: color-mix(in srgb, var(--success, #4caf50) 10%, transparent);
 }
 /* A faint edge so the box is findable before you hover it. */
-.xterm-decoration.im-box::before {
+.to-mark.im-box::before {
   content: ''; position: absolute; left: 0; top: 2px; bottom: 2px; width: 2px;
   border-radius: 1px; background: var(--accent, #9d7ee0); opacity: 0.45;
 }
@@ -32,7 +38,7 @@
 
 /* Rows sized by inline-marks.js from each image's shape: the image at its
    own size, shrunk to the terminal's width and height. */
-.xterm-decoration.im-chip {
+.to-mark.im-chip {
   pointer-events: auto; display: flex; flex-direction: column; align-items: flex-start;
   overflow: hidden;
 }
