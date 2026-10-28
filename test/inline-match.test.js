@@ -95,3 +95,29 @@ test('readRowFor finds the Read line an image belongs under', () => {
   assert.equal(readRowFor(['● Read(C:\proj\shot.png)'], 0), 0);
   assert.equal(readRowFor(['  Already read the file'], 0), -1);
 });
+
+const { cursorTargetRow } = require('../public/inline-match');
+
+test('a cursor move up gives the row it lands on', () => {
+  assert.equal(cursorTargetRow('A', [5], 30), 25);
+  assert.equal(cursorTargetRow('A', [], 30), 29); // CUU defaults to 1
+  assert.equal(cursorTargetRow('A', [0], 30), 29);
+  assert.equal(cursorTargetRow('F', [40], 30), 0); // clamped at the top
+  assert.equal(cursorTargetRow('M', [], 3), 2);
+});
+
+test('an absolute position or a restored cursor gives its row', () => {
+  assert.equal(cursorTargetRow('H', [10, 4], 30), 9);
+  assert.equal(cursorTargetRow('H', [], 30), 0);
+  assert.equal(cursorTargetRow('d', [7], 30), 6);
+  assert.equal(cursorTargetRow('8', [], 30, 12), 12);
+  assert.equal(cursorTargetRow('u', [], 30), null); // nothing saved
+});
+
+test('erasing above or the whole screen reaches the top; erasing below does not', () => {
+  assert.equal(cursorTargetRow('J', [2], 30), 0);
+  assert.equal(cursorTargetRow('J', [3], 30), 0);
+  assert.equal(cursorTargetRow('J', [1], 30), 0);
+  assert.equal(cursorTargetRow('J', [], 30), null);
+  assert.equal(cursorTargetRow('B', [3], 30), null);
+});

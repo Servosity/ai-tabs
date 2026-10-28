@@ -139,7 +139,30 @@
     return -1;
   }
 
-  const api = { normalize, findBlocks, liveActivityRow, placeImages, readRowFor };
+  /**
+   * The screen row (0-based) a control sequence sends the cursor to, when it
+   * may be above where it is; null when the sequence moves it no higher.
+   * The agent redraws what it still owns by moving the cursor up to it, so
+   * this is the highest row a write is about to touch.
+   * @param {string} final the CSI final byte ('A' CUU, 'F' CPL, 'H'/'f' CUP,
+   *   'd' VPA, 'J' ED) or 'M' (ESC M, reverse index), '8'/'u' (restore cursor)
+   * @param {number[]} params the sequence's numeric parameters (0 or missing = default)
+   * @param {number} cursorY the cursor's screen row now
+   * @param {number} [savedY] the row saved by ESC 7 / CSI s
+   */
+  function cursorTargetRow(final, params, cursorY, savedY) {
+    const p0 = params && params.length && params[0] > 0 ? params[0] : 0;
+    switch (final) {
+      case 'A': case 'F': return Math.max(0, cursorY - Math.max(1, p0));
+      case 'M': return Math.max(0, cursorY - 1);
+      case 'H': case 'f': case 'd': return Math.max(1, p0) - 1;
+      case 'J': return p0 === 1 || p0 === 2 || p0 === 3 ? 0 : null; // erase above, or all
+      case '8': case 'u': return savedY == null ? null : savedY;
+      default: return null;
+    }
+  }
+
+  const api = { normalize, findBlocks, liveActivityRow, placeImages, readRowFor, cursorTargetRow };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   if (global) global.InlineMatch = api;
 })(typeof window !== 'undefined' ? window : null);

@@ -1207,6 +1207,7 @@
           term,
           copy: (text) => writeClipboard(text).then(() => true, () => false),
           focusTerminal: () => term.focus(),
+          log: ccDebugLog,
         }) : null;
 
         function slRender() {
