@@ -687,6 +687,20 @@
         if (!isBackgroundTab) term.focus();
 
         // ── Debug log helper — POSTs to /api/debug-log (server gates on settings.debug). ──
+        // Image gap opens and closes, kept with debug logging off so a bad
+        // screen can be explained afterwards (read this key in the devtools).
+        const MARK_LOG_KEY = 'ai-tabs.inline-marks-log';
+        const MARK_LOG_MAX = 300;
+        function rememberMarkEvent(id, msg) {
+          try {
+            const events = JSON.parse(localStorage.getItem(MARK_LOG_KEY) || '[]');
+            events.push(`${new Date().toISOString()} [${id}] ${msg}`);
+            localStorage.setItem(MARK_LOG_KEY, JSON.stringify(events.slice(-MARK_LOG_MAX)));
+          } catch (err) {
+            console.warn('inline-marks log:', err);
+          }
+        }
+
         function ccDebugLog(tag, msg) {
           try {
             fetch('/api/debug-log', {
@@ -1207,7 +1221,7 @@
           term,
           copy: (text) => writeClipboard(text).then(() => true, () => false),
           focusTerminal: () => term.focus(),
-          log: ccDebugLog,
+          log: (tag, msg) => { ccDebugLog(tag, msg); rememberMarkEvent(sessionId, msg); },
         }) : null;
 
         function slRender() {

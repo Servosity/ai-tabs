@@ -18,7 +18,9 @@
  * rows it did not draw would put its text in the gap, under the image. So a
  * write that sends the cursor to or above a gap on screen first closes the
  * gap (the screen is as the agent left it again); the image waits for its
- * line to reach scrollback, where the agent can't reach.
+ * line to reach scrollback, where the agent can't reach. Whatever else
+ * writes into a gap (a move nothing here watches for), the image comes off it
+ * as soon as the write is parsed: an image is never drawn over text.
  */
 (function (global) {
   'use strict';
@@ -37,6 +39,7 @@
   // ones arrive when a restarted server re-reads the transcript, and the
   // current line has nothing to do with them.
   const LIVE_WINDOW_MS = 60 * 1000;
+  const MAX_LOGGED_TEXT = 40;
   const KEY_ESCAPE = 'Escape';
 
   function el(tag, className, text) {
@@ -178,6 +181,8 @@
       buf.lines.splice(at, 0, ...blanks);
       const trimmed = before + n - buf.lines.length; // a full scrollback drops its oldest rows
       buf.ybase += n - trimmed;
+      // A saved cursor is an absolute row: keep it on the row it was saved on.
+      buf.savedY = buf.savedY >= at ? buf.savedY + n - trimmed : Math.max(0, buf.savedY - trimmed);
       buf.ydisp = atBottom ? buf.ybase : Math.max(0, buf.ydisp + (buf.ydisp >= at ? n : 0) - trimmed);
       if (core.viewport) core.viewport.syncScrollArea(true);
       term.refresh(0, term.rows - 1);
@@ -200,50 +205,93 @@
       const atBottom = buf.ydisp === buf.ybase;
       buf.lines.splice(at, n);
       buf.ybase -= n;
+      if (buf.savedY >= at) buf.savedY = Math.max(at, buf.savedY - n);
       buf.ydisp = atBottom ? buf.ybase : Math.min(buf.ybase, Math.max(0, buf.ydisp - (buf.ydisp > at ? n : 0)));
       if (core.viewport) core.viewport.syncScrollArea(true);
       term.refresh(0, term.rows - 1);
       return true;
     }
 
+    /** Rows just moved: any gap may have been on screen since the last look. */
+    function markGapsExposed() {
+      for (const gap of gaps.values()) gap.exposed = true;
+    }
+
+    /** Stop tracking a gap: its image waits for its line to reach scrollback. */
+    function forgetGap(line, gap) {
+      const chip = chips.get(line);
+      if (chip) { chip.mark.dispose(); chip.marker.dispose(); chips.delete(line); }
+      if (live(gap.anchor)) gap.anchor.dispose();
+      if (live(gap.top)) gap.top.dispose();
+      gaps.delete(line);
+      waitingForScroll = true;
+    }
+
     /**
-     * The agent is about to move its cursor to screen row `target`: close
-     * every gap opened on screen whose last row is at or below it, lowest
-     * first (closing one doesn't move the rows above it in the buffer). A gap
-     * opened in scrollback took no row the agent drew: it stays.
+     * The agent is about to move its cursor to screen row `target`: close the
+     * gaps at or below it, lowest first. Closing one brings the rows above it
+     * down onto the screen, gaps among them, so each pass looks again from
+     * where everything is now. A gap wholly in scrollback can't be reached.
      */
     function closeGapsReachedBy(target) {
       if (target == null || !gaps.size || term.buffer.active.type !== 'normal') return;
-      const ybase = term.buffer.normal.baseY;
-      const reached = [...gaps.entries()]
-        .filter(([, g]) => g.onScreen && live(g.top) && g.top.line + g.rows - 1 >= ybase + target)
-        .sort((a, b) => b[1].top.line - a[1].top.line);
-      for (const [line, g] of reached) {
-        const top = g.top.line;
-        if (!removeGapRows(g)) continue;
-        if (live(g.anchor)) g.anchor.dispose();
-        gaps.delete(line);
-        waitingForScroll = true;
-        log('inline-marks', `closed gap at ${top} (${g.rows} rows, ybase ${ybase}): the agent redraws from screen row ${target}`);
+      for (;;) {
+        const ybase = term.buffer.normal.baseY;
+        const reached = [...gaps.entries()]
+          .filter(([, g]) => live(g.top) && g.top.line + g.rows - 1 >= ybase + target)
+          .sort((a, b) => b[1].top.line - a[1].top.line);
+        if (!reached.length) return;
+        const [line, gap] = reached[0];
+        const at = gap.top.line;
+        const closed = removeGapRows(gap);
+        forgetGap(line, gap); // a gap that couldn't close still loses its image: text is coming
+        markGapsExposed();
+        log('inline-marks', `${closed ? 'closed' : 'gave up on'} gap at ${at} (${gap.rows} rows, ybase ${ybase}): the agent redraws from screen row ${target}`);
+      }
+    }
+
+    /**
+     * Text got into a gap after all: take the image off it. Only a gap with
+     * rows on screen, now or at the last look, can have been written to: the
+     * same write may have scrolled it away again. The rest stay unread, so a
+     * long scrollback of images costs nothing per write.
+     */
+    function dropOverwrittenGaps() {
+      if (!gaps.size || term.buffer.active.type !== 'normal') return;
+      const b = term.buffer.normal;
+      for (const [line, gap] of [...gaps]) {
+        if (!live(gap.top)) continue;
+        const end = gap.top.line + gap.rows;
+        const exposed = end > b.baseY;
+        if (!exposed && !gap.exposed) continue;
+        gap.exposed = exposed;
+        for (let r = gap.top.line; r < end; r++) {
+          const row = b.getLine(r);
+          const text = row ? row.translateToString(true).trim() : '';
+          if (!text) continue;
+          log('inline-marks', `text in gap at ${gap.top.line} (${gap.rows} rows, ybase ${b.baseY}), screen row ${r - b.baseY}: ${text.slice(0, MAX_LOGGED_TEXT)}`);
+          forgetGap(line, gap);
+          break;
+        }
       }
     }
 
     // Watch the agent's cursor moves (each handler only looks: returning
     // false lets xterm carry the sequence out as usual).
-    let savedY = null;
     function watch(final, params) {
-      const target = match.cursorTargetRow(final, params, term.buffer.normal.cursorY, savedY);
-      if (target != null && target < term.buffer.normal.cursorY + 1) closeGapsReachedBy(target);
+      const b = term.buffer.normal;
+      const buf = term._core && term._core.buffers && term._core.buffers.normal;
+      const savedRow = buf && buf.savedY != null ? Math.max(0, buf.savedY - b.baseY) : null;
+      const target = match.cursorTargetRow(final, params, b.cursorY, savedRow, term.rows);
+      if (target != null && target < b.cursorY + 1) closeGapsReachedBy(target);
       return false;
     }
     if (term.parser && match && match.cursorTargetRow) {
       const nums = (params) => Array.from(params || [], (p) => (Array.isArray(p) ? p[0] : p));
-      for (const final of ['A', 'F', 'H', 'f', 'd', 'J']) {
+      for (const final of ['A', 'F', 'H', 'f', 'd', 'J', 'r']) {
         term.parser.registerCsiHandler({ final }, (params) => watch(final, nums(params)));
       }
-      term.parser.registerCsiHandler({ final: 's' }, () => { savedY = term.buffer.normal.cursorY; return false; });
       term.parser.registerCsiHandler({ final: 'u' }, () => watch('u', []));
-      term.parser.registerEscHandler({ final: '7' }, () => { savedY = term.buffer.normal.cursorY; return false; });
       term.parser.registerEscHandler({ final: '8' }, () => watch('8', []));
       term.parser.registerEscHandler({ final: 'M' }, () => watch('M', []));
     }
@@ -309,12 +357,11 @@
         const at = gap ? gap.top.line + gap.rows : line + 1;
         const n = parts.reduce((sum, p) => sum + p.rows, 0);
         if (!insertBlankRows(at, n, onScreenOk)) continue;
-        if (gap) { gap.parts.push(...parts); gap.rows += n; gap.onScreen = gap.onScreen || at > ybase; continue; }
+        if (gap) { gap.parts.push(...parts); gap.rows += n; continue; }
         const anchor = markerAt(line);
         const top = markerAt(line + 1);
-        const onScreen = line >= ybase;
-        if (anchor && top) gaps.set(line, { anchor, top, parts, rows: n, onScreen });
-        if (anchor && top && onScreen) log('inline-marks', `opened gap at ${line + 1} (${n} rows) on screen, ybase ${ybase}`);
+        if (anchor && top) gaps.set(line, { anchor, top, parts, rows: n });
+        if (anchor && top && line >= ybase) log('inline-marks', `opened gap at ${line + 1} (${n} rows) on screen, ybase ${ybase}`);
       }
       // Re-key by current line: earlier inserts moved the gaps below them.
       const rekeyed = [...gaps.values()].filter((g) => live(g.anchor) && live(g.top));
@@ -421,11 +468,11 @@
       scanTimer = setTimeout(() => scan(full), SCAN_DEBOUNCE_MS);
     }
     // New output may be the block a pending snippet is waiting for.
-    term.onWriteParsed(() => { if (pending.size) scheduleScan(false); });
+    term.onWriteParsed(() => { dropOverwrittenGaps(); if (pending.size) scheduleScan(false); });
     // An image line scrolling into scrollback can now get its rows.
     term.onScroll(() => { if (waitingForScroll) scheduleScan(false); });
     // A width change re-wraps rows: redraw everything at the new positions.
-    term.onResize(() => { clearAll(false); scheduleScan(true); });
+    term.onResize(() => { markGapsExposed(); clearAll(false); scheduleScan(true); });
 
     function clearAll(dropImages) {
       for (const list of boxes.values()) for (const b of list) { b.mark.dispose(); b.marker.dispose(); }

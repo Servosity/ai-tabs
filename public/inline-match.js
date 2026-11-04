@@ -145,18 +145,24 @@
    * The agent redraws what it still owns by moving the cursor up to it, so
    * this is the highest row a write is about to touch.
    * @param {string} final the CSI final byte ('A' CUU, 'F' CPL, 'H'/'f' CUP,
-   *   'd' VPA, 'J' ED) or 'M' (ESC M, reverse index), '8'/'u' (restore cursor)
+   *   'd' VPA, 'J' ED, 'r' DECSTBM, which homes the cursor) or 'M' (ESC M,
+   *   reverse index), '8'/'u' (restore cursor)
    * @param {number[]} params the sequence's numeric parameters (0 or missing = default)
    * @param {number} cursorY the cursor's screen row now
    * @param {number} [savedY] the row saved by ESC 7 / CSI s
+   * @param {number} [rows] the terminal's height, for DECSTBM's default bottom
    */
-  function cursorTargetRow(final, params, cursorY, savedY) {
+  function cursorTargetRow(final, params, cursorY, savedY, rows) {
     const p0 = params && params.length && params[0] > 0 ? params[0] : 0;
     switch (final) {
       case 'A': case 'F': return Math.max(0, cursorY - Math.max(1, p0));
       case 'M': return Math.max(0, cursorY - 1);
       case 'H': case 'f': case 'd': return Math.max(1, p0) - 1;
       case 'J': return p0 === 1 || p0 === 2 || p0 === 3 ? 0 : null; // erase above, or all
+      case 'r': { // xterm ignores a region that isn't at least two rows, and leaves the cursor
+        const bottom = !params || !(params[1] > 0) || params[1] > rows ? rows : params[1];
+        return bottom > Math.max(1, p0) ? 0 : null;
+      }
       case '8': case 'u': return savedY == null ? null : savedY;
       default: return null;
     }

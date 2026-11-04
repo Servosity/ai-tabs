@@ -1,6 +1,6 @@
 {
   "name": "ai-tabs",
-  "version": "0.42.3",
+  "version": "0.42.4",
   "description": "Electron tab manager for AI coding-agent terminals (Claude Code, Codex, Gemini, ...)",
   "main": "main.js",
   "repository": "github:servosity/ai-tabs",
@@ -30,6 +30,7 @@
   },
   "devDependencies": {
     "@electron/rebuild": "^4.0.3",
+    "@xterm/headless": "^5.5.0",
     "electron": "^41.10.6",
     "rcedit": "^5.0.2",
     "sharp": "^0.35.0"
