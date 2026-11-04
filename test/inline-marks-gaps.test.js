@@ -36,6 +36,7 @@ global.TermOverlay = {
   },
 };
 require('../public/inline-match');
+require('../public/inline-gaps');
 require('../public/inline-marks');
 
 const COLS = 120;
