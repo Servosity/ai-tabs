@@ -233,3 +233,75 @@ test('a gap exposed and overwritten within one write takes its image off', async
   await pause(SCAN_WAIT_MS);
   assert.deepEqual(agent.textUnderImages(), []);
 });
+
+// A long session's scrollback is full: every row inserted drops the oldest row,
+// so the rows above the insert all move up.
+const FULL_SCROLLBACK = 200;
+const rowText = (term, row) => term.buffer.normal.getLine(row)?.translateToString(true).trim() || '';
+function assertUnderReadLines(agent, count) {
+  assert.equal(chips.size, count, 'every image is drawn');
+  assert.deepEqual(agent.textUnderImages(), []);
+  for (const chip of chips) {
+    assert.match(rowText(agent.term, chip.marker.line - 1), /Read\(i\d+\.png\)/, 'the image is right under its Read line');
+  }
+}
+function blankRows(term) {
+  const buffer = term.buffer.normal;
+  let blank = 0;
+  for (let row = 0; row < buffer.baseY; row++) if (!rowText(term, row)) blank++;
+  return blank;
+}
+
+test('with a full scrollback, an image scrolled off sits in its own rows under its Read line', async () => {
+  const agent = await agentTerminal({ scrollback: FULL_SCROLLBACK });
+  await agent.lines(FULL_SCROLLBACK + 100);
+  await agent.read();
+  await agent.lines(70);
+  await pause(SCAN_WAIT_MS);
+  assertUnderReadLines(agent, 1);
+});
+
+test('with a full scrollback, several images scrolled off each sit under their own Read line', async () => {
+  const agent = await agentTerminal({ scrollback: FULL_SCROLLBACK });
+  await agent.lines(FULL_SCROLLBACK + 100);
+  for (let i = 0; i < 3; i++) { await agent.read(); await agent.lines(3); }
+  await agent.lines(70);
+  await pause(SCAN_WAIT_MS);
+  assertUnderReadLines(agent, 3);
+});
+
+test('with a full scrollback, an image given rows on screen sits under its Read line', async () => {
+  const agent = await agentTerminal({ scrollback: FULL_SCROLLBACK });
+  await agent.lines(FULL_SCROLLBACK + 100);
+  await agent.read();
+  await agent.lines(3);
+  await agent.idle();
+  assertUnderReadLines(agent, 1);
+});
+
+test('with a full scrollback, more output does not keep adding blank rows for the same image', async () => {
+  const agent = await agentTerminal({ scrollback: FULL_SCROLLBACK });
+  await agent.lines(FULL_SCROLLBACK + 100);
+  await agent.read();
+  await agent.lines(70);
+  await pause(SCAN_WAIT_MS);
+  const before = blankRows(agent.term);
+  agent.term.resize(COLS, ROWS + 1); // every gap is looked at again
+  await pause(SCAN_WAIT_MS);
+  for (let i = 0; i < 3; i++) { await agent.lines(2); await pause(SCAN_WAIT_MS); }
+  assert.ok(blankRows(agent.term) <= before, `blank rows grew from ${before} to ${blankRows(agent.term)}`);
+});
+
+test('with a full scrollback, an image keeps its one gap when output moves it before the next look', async () => {
+  const agent = await agentTerminal({ scrollback: FULL_SCROLLBACK });
+  await agent.lines(FULL_SCROLLBACK + 100);
+  await agent.read();
+  await agent.lines(70);
+  await pause(SCAN_WAIT_MS);
+  const before = blankRows(agent.term);
+  await agent.lines(2); // the full scrollback drops rows: the gap's row numbers change
+  agent.term.resize(COLS, ROWS + 1);
+  await pause(SCAN_WAIT_MS);
+  assertUnderReadLines(agent, 1);
+  assert.equal(blankRows(agent.term), before);
+});

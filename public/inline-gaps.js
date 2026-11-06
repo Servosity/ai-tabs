@@ -98,6 +98,24 @@
       return true;
     }
 
+    /**
+     * Key the gaps by the line their anchor is on now, `added` with them. A
+     * full scrollback drops a row for every row the agent writes, so the
+     * lines change between one look and the next.
+     */
+    function rekey(added) {
+      const all = [...gaps.values(), ...(added || [])].filter((g) => live(g.anchor) && live(g.top));
+      gaps.clear();
+      for (const g of all) gaps.set(g.anchor.line, g);
+    }
+
+    /** Rows a full scrollback would drop off its top to take `n` more. */
+    function rowsDroppedBy(n) {
+      const core = term._core;
+      const lines = core && core.buffers && core.buffers.normal && core.buffers.normal.lines;
+      return lines && lines.maxLength ? Math.max(0, lines.length + n - lines.maxLength) : 0;
+    }
+
     /** Rows just moved: any gap may have been on screen since the last look. */
     function markGapsExposed() {
       for (const gap of gaps.values()) gap.exposed = true;
@@ -189,27 +207,35 @@
      */
     function open(byLine, rowsFor, onScreenOk) {
       waitingForScroll = false;
-      const ybase = term.buffer.normal.baseY;
-      for (const line of [...byLine.keys()].sort((a, b) => b - a)) { // bottom up: inserts don't move lines above
-        let gap = gaps.get(line);
+      rekey(); // output since the last look may have moved every gap
+      // A marker on each image line, taken before any rows go in: once the
+      // scrollback is full, an insert drops the oldest rows and every row
+      // above it moves up, so a row number read earlier is wrong.
+      const wanted = [...byLine.keys()].sort((a, b) => b - a) // bottom up
+        .map((line) => ({ items: byLine.get(line), at: markerAt(line), gap: gaps.get(line) }));
+      const opened = [];
+      for (const want of wanted) {
+        if (!live(want.at)) continue;
+        const line = want.at.line;
+        const ybase = term.buffer.normal.baseY;
+        let gap = want.gap;
         if (gap && !(live(gap.anchor) && gap.anchor.line === line && live(gap.top))) gap = null;
         if (!gap && line >= ybase && !onScreenOk) { waitingForScroll = true; continue; }
-        const missing = byLine.get(line).filter((item) => !(gap && gap.parts.some((p) => p.id === item.id)));
+        const missing = want.items.filter((item) => !(gap && gap.parts.some((p) => p.id === item.id)));
         if (!missing.length) continue;
         const parts = missing.map((item) => ({ id: item.id, rows: rowsFor(item) }));
-        const at = gap ? gap.top.line + gap.rows : line + 1;
         const n = parts.reduce((sum, p) => sum + p.rows, 0);
-        if (!insertBlankRows(at, n, onScreenOk)) continue;
+        if (line < rowsDroppedBy(n)) continue; // the insert would drop the image's own line off the top
+        if (!insertBlankRows(gap ? gap.top.line + gap.rows : line + 1, n, onScreenOk)) continue;
         if (gap) { gap.parts.push(...parts); gap.rows += n; continue; }
-        const anchor = markerAt(line);
-        const top = markerAt(line + 1);
-        if (anchor && top) gaps.set(line, { anchor, top, parts, rows: n });
-        if (anchor && top && line >= ybase) log('inline-marks', `opened gap at ${line + 1} (${n} rows) on screen, ybase ${ybase}`);
+        if (!live(want.at)) continue;
+        const anchor = markerAt(want.at.line);
+        const top = markerAt(want.at.line + 1);
+        if (anchor && top) opened.push({ anchor, top, parts, rows: n });
+        if (anchor && top && line >= ybase) log('inline-marks', `opened gap at ${top.line} (${n} rows) on screen, ybase ${ybase}`);
       }
-      // Re-key by current line: earlier inserts moved the gaps below them.
-      const rekeyed = [...gaps.values()].filter((g) => live(g.anchor) && live(g.top));
-      gaps.clear();
-      for (const g of rekeyed) gaps.set(g.anchor.line, g);
+      for (const want of wanted) if (want.at) want.at.dispose();
+      rekey(opened); // only now: the inserts moved the other gaps
     }
 
     function clear() {
