@@ -5,7 +5,18 @@ const path = require('node:path');
 const os = require('node:os');
 const { execFileSync } = require('node:child_process');
 
-const { checkForUpdate, applyUpdate, needsNpmInstall } = require('../lib/auto-update');
+const { checkForUpdate, applyUpdate, needsNpmInstall, isLockfileOnlyChurn } = require('../lib/auto-update');
+
+test('isLockfileOnlyChurn accepts only a lone modified lockfile', () => {
+  assert.strictEqual(isLockfileOnlyChurn('M package-lock.json'), true);
+  assert.strictEqual(isLockfileOnlyChurn(' M package-lock.json'), true);
+  assert.strictEqual(isLockfileOnlyChurn('MM package-lock.json'), true);
+  assert.strictEqual(isLockfileOnlyChurn('M package-lock.json\n M package.json'), false);
+  assert.strictEqual(isLockfileOnlyChurn('M app.js'), false);
+  assert.strictEqual(isLockfileOnlyChurn('?? package-lock.json'), false);
+  assert.strictEqual(isLockfileOnlyChurn('D package-lock.json'), false);
+  assert.strictEqual(isLockfileOnlyChurn(''), false);
+});
 
 test('needsNpmInstall flags dependency files only', () => {
   assert.strictEqual(needsNpmInstall(['main.js', 'lib/agents.js']), false);
@@ -70,6 +81,32 @@ test('checkForUpdate skips on a dirty working tree', async (t) => {
   const res = await checkForUpdate(clone);
   assert.strictEqual(res.behind, 0);
   assert.match(res.reason, /local changes/);
+});
+
+/** clone with a committed lockfile, a pending origin commit, and npm-style churn */
+function makeChurnedRepos(t) {
+  const repos = makeRepos(t);
+  commitToOrigin(repos.origin, 'package-lock.json', '{}\n');
+  git(repos.clone, 'pull', '-q');
+  commitToOrigin(repos.origin, 'app.js', 'v2\n');
+  fs.writeFileSync(path.join(repos.clone, 'package-lock.json'), '{"churn":true}\n');
+  return repos;
+}
+
+test('checkForUpdate discards lone lockfile churn and still updates', async (t) => {
+  const { clone } = makeChurnedRepos(t);
+  const res = await checkForUpdate(clone);
+  assert.strictEqual(res.behind, 1);
+  assert.strictEqual(git(clone, 'status', '--porcelain'), '');
+});
+
+test('checkForUpdate keeps a lockfile changed alongside other edits', async (t) => {
+  const { clone } = makeChurnedRepos(t);
+  fs.writeFileSync(path.join(clone, 'app.js'), 'local edit\n');
+  const res = await checkForUpdate(clone);
+  assert.strictEqual(res.behind, 0);
+  assert.match(res.reason, /local changes/);
+  assert.match(fs.readFileSync(path.join(clone, 'package-lock.json'), 'utf8'), /churn/);
 });
 
 test('checkForUpdate skips off-master branches', async (t) => {
