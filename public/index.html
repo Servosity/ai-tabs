@@ -1445,9 +1445,12 @@
           };
         }
 
+        // wss on an https page: a server behind a TLS proxy (frontline.servosity.com:8443)
+        // otherwise gets a blank tab, the browser blocks ws:// as mixed content.
+        const wsScheme = location.protocol === 'https:' ? 'wss' : 'ws';
         const wsUrl = wsAuthKey
-          ? `ws://${location.host}?key=${wsAuthKey}`
-          : `ws://${location.host}`;
+          ? `${wsScheme}://${location.host}?key=${wsAuthKey}`
+          : `${wsScheme}://${location.host}`;
         ws = new WebSocket(wsUrl);
         window._ws = ws;
         // If sessionId came from URL (post-restart reconnect), attach instead of create
