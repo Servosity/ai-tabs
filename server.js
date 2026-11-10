@@ -79,6 +79,14 @@ function isDebugEnabled() {
 
 const ORPHAN_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes before killing orphaned sessions
 
+// Headless host (AI_TABS_HEADLESS=1): the server runs on a machine nobody sits
+// at, and agents are opened by an orchestrator whether or not a UI is connected.
+// Two things change: /api/open-tab starts the session itself when no control
+// client can take it, and a session with no viewer is NOT an orphan - it lives
+// until its process exits or it is closed through the API. A UI that connects
+// later finds it in the session list and attaches.
+const HEADLESS = process.env.AI_TABS_HEADLESS === '1';
+
 // How long to wait after an attach before nudging the app to repaint. The client
 // fits its terminal and sends a resize once its socket is up; nudging before that
 // lands would repaint at the previous client's dimensions.
@@ -309,6 +317,7 @@ function broadcastAll(msg) {
  */
 function startOrphanTimer(sessionId) {
   clearOrphanTimer(sessionId);
+  if (HEADLESS) return; // no viewer is the normal state here, not abandonment
   orphanTimers.set(sessionId, setTimeout(() => {
     orphanTimers.delete(sessionId);
     const clients = sessionClients.get(sessionId);
@@ -804,6 +813,19 @@ app.post('/api/open-tab', (req, res) => {
     }
   }
 
+  // Headless host, nobody connected: the server opens it. The session is in
+  // the list a UI gets when it connects, so it can be attached to later.
+  if (!dispatched && HEADLESS) {
+    const made = createSession({ cwd, requestId, launchAgent: agentId || undefined }, null);
+    if (made.error) {
+      pendingRequests.delete(requestId);
+      return res.status(500).json({ error: made.error });
+    }
+    pendingRequests.get(requestId).claimedBy = 'server';
+    dispatched = true;
+    serverDebugLog(`[open-tab] request=${requestId} opened headless as session ${made.id}`);
+  }
+
   if (!dispatched) {
     pendingRequests.delete(requestId);
     const error = controlClients.size > 0
@@ -1041,6 +1063,136 @@ function grantControl(ws) {
   serverDebugLog(`[control] control granted to ${ws._controlAddr}${prev ? `, revoked from ${prev._controlAddr}` : ''}`);
 }
 
+/**
+ * Start a session: the body of the WebSocket 'create' message, callable
+ * without a socket so a headless host can open a tab nobody is looking at.
+ * `ws` is the creating client, or null. Returns { id } or { error }.
+ */
+function createSession(msg, ws) {
+  const fail = (message) => {
+    if (ws) ws.send(JSON.stringify({ type: 'error', message }));
+    return { error: message };
+  };
+  const nextId = ptyManager.nextId;
+  // Only an open-tab request may auto-type a command, and only once.
+  const command = takeRequestCommand(msg.requestId);
+  // Orchestrators may re-export CC_TABS_SESSION_ID (some put a
+  // UUID there), so hooks route by AI_TABS_TAB_ID, which only we set.
+  const extraEnv = { CC_TABS_SESSION_ID: String(nextId), [commandLaunch.TAB_ID_ENV]: String(nextId) };
+  if (msg.windowId) extraEnv.CC_TABS_WINDOW_ID = String(msg.windowId);
+
+  // Resolve the agent up front so its env vars apply to the PTY itself.
+  // A request's command replaces the agent launch, as it always has.
+  let launchAgent = null;
+  if (!command && (msg.launchAgent || msg.launchClaude)) {
+    const requestedId = msg.launchAgent || 'claude';
+    launchAgent = agents.getAgent(requestedId)
+      || agents.getAgent(readSettings().defaultAgent)
+      || agents.getAgent('claude');
+    if (!agents.getAgent(requestedId)) {
+      console.warn(`[agents] Unknown agent '${requestedId}' — falling back to '${launchAgent.id}'`);
+    }
+    // Base env plus any enabled launch options (Settings default,
+    // overridden per project) — e.g. Claude's native-scrollback mode.
+    Object.assign(extraEnv, agents.resolveLaunchEnv(
+      launchAgent.id,
+      launchOptionsFor(launchAgent.id, msg.cwd || null)
+    ));
+  }
+
+  // A raw command that starts Claude (open-tab API) gets Claude's
+  // detection and hook settings, like a registry launch.
+  const commandAgent = !launchAgent && commandLaunch.commandLaunchesClaude(command)
+    ? agents.getAgent('claude')
+    : null;
+  const detectionAgent = launchAgent || commandAgent;
+
+  // A bad cwd makes node-pty throw synchronously, and an uncaught throw
+  // here takes down the server and every live session with it.
+  if (msg.cwd && !isExistingDir(msg.cwd)) {
+    return fail(`Folder not found: ${msg.cwd}`);
+  }
+  let created;
+  try {
+    created = ptyManager.create(
+    msg.cwd || null,
+    (data) => {
+      broadcastToSession(id, { type: 'data', data });
+    },
+    (exitCode) => {
+      broadcastToSession(id, { type: 'exit', exitCode });
+      sessionWindows.delete(id);
+      statusline.unregister(id);
+      media.endSession(id);
+    },
+    () => {
+      broadcastToSession(id, { type: 'idle', sessionId: id });
+    },
+    msg.cols || 120,
+    msg.rows || 30,
+    extraEnv,
+    detectionAgent ? detectionAgent.detection : {},
+    {
+      // Remembered so a UI restart can restore the tab's agent identity
+      // (its colored dot) without re-launching anything.
+      agentId: launchAgent ? launchAgent.id : null,
+    }
+    );
+  } catch (err) {
+    console.error(`[ws-create] could not start a shell in ${msg.cwd || '(home)'}: ${err.message}`);
+    return fail(`Could not start a shell: ${err.message}`);
+  }
+  const { id } = created;
+  if (msg.windowId) {
+    sessionWindows.set(id, String(msg.windowId));
+    serverDebugLog(`[ws-create] session=${id} windowId=${msg.windowId}`);
+  } else {
+    serverDebugLog(`[ws-create] session=${id} NO windowId in create message`);
+  }
+  if (ws) getClientsForSession(id).add(ws);
+  clearOrphanTimer(id);
+  statusline.register(id, { agent: launchAgent, cwd: msg.cwd || null });
+  statusline.pushSoon(id);
+  // PTY ids restart at 1 per server process: drop any media an earlier
+  // process left under this id before its hooks can fire.
+  media.beginSession(id);
+  if (ws) ws.send(JSON.stringify({ type: 'created', sessionId: id }));
+
+  // Link requestId → sessionId for open-tab API polling
+  if (msg.requestId && pendingRequests.has(msg.requestId)) {
+    pendingRequests.get(msg.requestId).sessionId = id;
+  }
+
+  // Auto-type command if provided (e.g., from open-tab API)
+  if (command) {
+    const typed = commandAgent
+      ? commandLaunch.withHookSettings(command, statuslineHookArgs(commandAgent))
+      : command;
+    setTimeout(() => ptyManager.write(id, typed + '\n'), 600);
+  } else if (launchAgent) {
+    if (!launchAgent.installed) {
+      setTimeout(() => broadcastToSession(id, {
+        type: 'data',
+        data: `\r\n\x1b[33m[ai-tabs] '${launchAgent.command}' not found on PATH — install it or pick another agent on the landing page.\x1b[0m\r\n`,
+      }), 600);
+    } else {
+      const currentSettings = readSettings();
+      const permissionProfileId = currentSettings.agentPermissions
+        ? currentSettings.agentPermissions[launchAgent.id]
+        : null;
+      const cmd = buildAgentCommand(
+        launchAgent,
+        msg.agentArgs || msg.claudeArgs,
+        msg.agentBypass === true,
+        permissionProfileId
+      ).replace(/\n$/, statuslineHookArgs(launchAgent) + '\n');
+      setTimeout(() => ptyManager.write(id, cmd), 600);
+      if (msg.cwd) projectAgents.recordIfUnset(msg.cwd, launchAgent.id);
+    }
+  }
+  return { id };
+}
+
 // WebSocket: each connection can create OR attach to a session
 wss.on('connection', (ws, req) => {
   // Authenticate remote WebSocket connections
@@ -1141,126 +1293,8 @@ wss.on('connection', (ws, req) => {
       }
 
       case 'create': {
-        const nextId = ptyManager.nextId;
-        // Only an open-tab request may auto-type a command, and only once.
-        const command = takeRequestCommand(msg.requestId);
-        // Orchestrators may re-export CC_TABS_SESSION_ID (some put a
-        // UUID there), so hooks route by AI_TABS_TAB_ID, which only we set.
-        const extraEnv = { CC_TABS_SESSION_ID: String(nextId), [commandLaunch.TAB_ID_ENV]: String(nextId) };
-        if (msg.windowId) extraEnv.CC_TABS_WINDOW_ID = String(msg.windowId);
-
-        // Resolve the agent up front so its env vars apply to the PTY itself.
-        // A request's command replaces the agent launch, as it always has.
-        let launchAgent = null;
-        if (!command && (msg.launchAgent || msg.launchClaude)) {
-          const requestedId = msg.launchAgent || 'claude';
-          launchAgent = agents.getAgent(requestedId)
-            || agents.getAgent(readSettings().defaultAgent)
-            || agents.getAgent('claude');
-          if (!agents.getAgent(requestedId)) {
-            console.warn(`[agents] Unknown agent '${requestedId}' — falling back to '${launchAgent.id}'`);
-          }
-          // Base env plus any enabled launch options (Settings default,
-          // overridden per project) — e.g. Claude's native-scrollback mode.
-          Object.assign(extraEnv, agents.resolveLaunchEnv(
-            launchAgent.id,
-            launchOptionsFor(launchAgent.id, msg.cwd || null)
-          ));
-        }
-
-        // A raw command that starts Claude (open-tab API) gets Claude's
-        // detection and hook settings, like a registry launch.
-        const commandAgent = !launchAgent && commandLaunch.commandLaunchesClaude(command)
-          ? agents.getAgent('claude')
-          : null;
-        const detectionAgent = launchAgent || commandAgent;
-
-        // A bad cwd makes node-pty throw synchronously, and an uncaught throw
-        // here takes down the server and every live session with it.
-        if (msg.cwd && !isExistingDir(msg.cwd)) {
-          ws.send(JSON.stringify({ type: 'error', message: `Folder not found: ${msg.cwd}` }));
-          break;
-        }
-        let created;
-        try {
-          created = ptyManager.create(
-          msg.cwd || null,
-          (data) => {
-            broadcastToSession(id, { type: 'data', data });
-          },
-          (exitCode) => {
-            broadcastToSession(id, { type: 'exit', exitCode });
-            sessionWindows.delete(id);
-            statusline.unregister(id);
-            media.endSession(id);
-          },
-          () => {
-            broadcastToSession(id, { type: 'idle', sessionId: id });
-          },
-          msg.cols || 120,
-          msg.rows || 30,
-          extraEnv,
-          detectionAgent ? detectionAgent.detection : {},
-          {
-            // Remembered so a UI restart can restore the tab's agent identity
-            // (its colored dot) without re-launching anything.
-            agentId: launchAgent ? launchAgent.id : null,
-          }
-          );
-        } catch (err) {
-          console.error(`[ws-create] could not start a shell in ${msg.cwd || '(home)'}: ${err.message}`);
-          ws.send(JSON.stringify({ type: 'error', message: `Could not start a shell: ${err.message}` }));
-          break;
-        }
-        const { id } = created;
-        sessionId = id;
-        if (msg.windowId) {
-          sessionWindows.set(id, String(msg.windowId));
-          serverDebugLog(`[ws-create] session=${id} windowId=${msg.windowId}`);
-        } else {
-          serverDebugLog(`[ws-create] session=${id} NO windowId in create message`);
-        }
-        getClientsForSession(id).add(ws);
-        clearOrphanTimer(id);
-        statusline.register(id, { agent: launchAgent, cwd: msg.cwd || null });
-        statusline.pushSoon(id);
-        // PTY ids restart at 1 per server process: drop any media an earlier
-        // process left under this id before its hooks can fire.
-        media.beginSession(id);
-        ws.send(JSON.stringify({ type: 'created', sessionId: id }));
-
-        // Link requestId → sessionId for open-tab API polling
-        if (msg.requestId && pendingRequests.has(msg.requestId)) {
-          pendingRequests.get(msg.requestId).sessionId = id;
-        }
-
-        // Auto-type command if provided (e.g., from open-tab API)
-        if (command) {
-          const typed = commandAgent
-            ? commandLaunch.withHookSettings(command, statuslineHookArgs(commandAgent))
-            : command;
-          setTimeout(() => ptyManager.write(id, typed + '\n'), 600);
-        } else if (launchAgent) {
-          if (!launchAgent.installed) {
-            setTimeout(() => broadcastToSession(id, {
-              type: 'data',
-              data: `\r\n\x1b[33m[ai-tabs] '${launchAgent.command}' not found on PATH — install it or pick another agent on the landing page.\x1b[0m\r\n`,
-            }), 600);
-          } else {
-            const currentSettings = readSettings();
-            const permissionProfileId = currentSettings.agentPermissions
-              ? currentSettings.agentPermissions[launchAgent.id]
-              : null;
-            const cmd = buildAgentCommand(
-              launchAgent,
-              msg.agentArgs || msg.claudeArgs,
-              msg.agentBypass === true,
-              permissionProfileId
-            ).replace(/\n$/, statuslineHookArgs(launchAgent) + '\n');
-            setTimeout(() => ptyManager.write(id, cmd), 600);
-            if (msg.cwd) projectAgents.recordIfUnset(msg.cwd, launchAgent.id);
-          }
-        }
+        const made = createSession(msg, ws);
+        if (made.id != null) sessionId = made.id;
         break;
       }
 
