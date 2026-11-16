@@ -528,6 +528,7 @@
   <script src="/xterm/lib/addon-search/addon-search.js"></script>
   <script src="/term-search.js"></script>
   <script src="/osc52.js"></script>
+  <script src="/force-selection.js"></script>
   <script src="/sl-rate-limits.js"></script>
   <script src="/inline-match.js"></script>
   <script src="/term-overlay.js"></script>
@@ -899,6 +900,9 @@
         setupCopyOnSelect(settings.behavior.copyOnSelect);
         // Apps that own the mouse (Claude Code fullscreen) copy via OSC 52.
         Osc52.install(term, writeClipboard, ccDebugLog);
+        // ...but a plain drag still makes OUR selection, so smart right-click
+        // and copy-on-select see it (see public/force-selection.js).
+        ForceSelection.install(container, term);
         ccDebugLog('clipenv', JSON.stringify({
           secureContext: window.isSecureContext,
           hasClipboard: !!navigator.clipboard,
