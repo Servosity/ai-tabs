@@ -17,7 +17,12 @@ const SETTINGS_FILE = path.join(__dirname, 'data', 'settings.json');
 // correct. The target comes from --server=<id> against the server list in
 // userData; no argument means the picker decides (see whenReady).
 const servers = require('./lib/servers');
+const clientIdentity = require('./lib/client-identity');
+const { sessionsToAdopt } = require('./lib/session-mirror');
+const crypto = require('crypto');
 const SERVERS_FILE = path.join(app.getPath('userData'), 'servers.json');
+// This user's name and id on shared tabs (lib/client-identity.js).
+const IDENTITY_FILE = path.join(app.getPath('userData'), 'identity.json');
 
 let remoteServerUrl = null;
 let remoteServerKey = null;
@@ -101,10 +106,12 @@ if (debugLog._enabled) {
   }, 10000);
 }
 
-// Multiple local instances are allowed to run side by side: the shared
-// server's control-ready handshake designates one controller at a time, and
-// a freshly launched window claims the slot (claim:true on register-control,
-// see connectControlWs), locking whichever window held it before.
+// Multiple instances (local or remote) are allowed to run side by side and
+// all stay usable: each shows every session (sessions-changed → adoptSessions)
+// and who types into a tab is decided per tab by the server. The controller
+// slot only picks who gets unaddressed open-tab requests and whose quit shuts
+// the server down; a freshly launched window claims it (claim:true on
+// register-control, see connectControlWs).
 // requestSingleInstanceLock is not used — at module scope it kills
 // WebContentsView renderers, and inside whenReady it always returns false.
 
@@ -170,6 +177,12 @@ let foreignDragTarget = null; // { winId, insertIndex } — tracks cross-window 
 // holds the controller slot; flips live via control-granted / control-revoked.
 let isController = null;
 let pendingReleaseAck = null; // resolver while a quit-time release-control awaits its ack
+// This process on the server: sessions it opened carry it, so it does not
+// mirror its own tabs back (see adoptSessions).
+const INSTANCE_ID = 'i-' + crypto.randomBytes(8).toString('hex');
+// Sessions whose tab the user closed here while someone else drove them:
+// they live on for that person and are not mirrored back in.
+const dismissedSessions = new Set();
 
 // ── Drag ghost overlay window (floats above title bar) ──
 let ghostWin = null;
@@ -418,10 +431,14 @@ function connectControlWs() {
         break;
 
       case 'control-revoked':
+        // No lock: this window keeps working; only the slot moved.
         controlLog(`[control] control-revoked by=${msg.by}`);
         isController = false;
         knownControlPeer = true; // someone else just took the slot from us
-        demoteFromController(msg.by || 'another client');
+        break;
+
+      case 'sessions-changed':
+        adoptSessions(msg.sessions || []);
         break;
 
       case 'release-ack':
@@ -547,10 +564,7 @@ function onControlReady(sessions, controller) {
   controlBootstrapped = true;
 
   if (isController === false) {
-    // A remote client (or, in remote mode, the server's own GUI) holds control:
-    // start locked. Tabs arrive via reconcile when control is granted.
-    demoteFromController(controller?.by || 'another client');
-    return;
+    controlLog(`[control] ${controller?.by || 'another client'} holds the controller slot; this window works alongside it`);
   }
 
   if (!isFirstControlReady) {
@@ -572,37 +586,6 @@ function onControlReady(sessions, controller) {
     // Fresh local start with no existing sessions — open favorites
     loadFavorites(state);
   }
-}
-
-// ── Lock overlay: shown while another control client holds the controller slot ──
-
-function showLockOverlay(state, by) {
-  if (state.win.isDestroyed()) return;
-  if (state.lockView) {
-    // already locked — refresh who holds control
-    state.lockView.webContents.loadFile(path.join(__dirname, 'public', 'lock.html'), { query: { by } });
-    return;
-  }
-  const view = new WebContentsView({
-    webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
-      contextIsolation: true,
-      nodeIntegration: false,
-    },
-  });
-  state.lockView = view;
-  state.win.contentView.addChildView(view); // added last → topmost, swallows all input
-  const { width, height } = state.win.getContentBounds();
-  view.setBounds({ x: 0, y: 0, width, height });
-  view.webContents.loadFile(path.join(__dirname, 'public', 'lock.html'), { query: { by } });
-  view.webContents.focus();
-}
-
-function hideLockOverlay(state) {
-  if (!state.lockView) return;
-  if (!state.win.isDestroyed()) state.win.contentView.removeChildView(state.lockView);
-  if (!state.lockView.webContents.isDestroyed()) state.lockView.webContents.close();
-  state.lockView = null;
 }
 
 // Bring this instance's tabs in line with the server's session list after a
@@ -638,7 +621,7 @@ async function reconcileTabs(sessions) {
     }
   }
   for (const session of sessions) {
-    if (seen.has(session.id)) continue;
+    if (seen.has(session.id) || dismissedSessions.has(session.id)) continue;
     const name = session.cwd ? path.basename(session.cwd) : `Session ${session.id}`;
     const cwdParam = session.cwd ? `&cwd=${encodeURIComponent(session.cwd)}` : '';
     createTab(state, `${BASE_URL}/?sessionId=${session.id}${cwdParam}`, name, false, true, false, false, {
@@ -648,15 +631,29 @@ async function reconcileTabs(sessions) {
   }
 }
 
-function demoteFromController(by) {
-  unregisterShortcuts();
-  for (const state of windows.values()) showLockOverlay(state, by);
+async function promoteToController(sessions) {
+  await reconcileTabs(sessions);
 }
 
-async function promoteToController(sessions) {
-  registerShortcutsIfFocused();
-  for (const state of windows.values()) hideLockOverlay(state);
-  await reconcileTabs(sessions);
+// Open a tab for each session another app (or the server) started — the
+// server sends the list on every create and exit. Add-only: a tab whose
+// session ended shows that itself.
+function adoptSessions(sessions) {
+  const state = windows.values().next().value;
+  if (!state || !controlBootstrapped) return;
+  const shown = new Set();
+  for (const st of windows.values()) {
+    for (const tab of st.tabs) if (tab.sessionId != null) shown.add(tab.sessionId);
+  }
+  for (const session of sessionsToAdopt(sessions, { instance: INSTANCE_ID, shown, dismissed: dismissedSessions })) {
+    const name = session.cwd ? path.basename(session.cwd) : `Session ${session.id}`;
+    const cwdParam = session.cwd ? `&cwd=${encodeURIComponent(session.cwd)}` : '';
+    controlLog(`[control] mirroring session ${session.id} opened elsewhere`);
+    createTab(state, `${BASE_URL}/?sessionId=${session.id}${cwdParam}`, name, false, true, false, false, {
+      agent: session.agentId || null,
+      sessionId: session.id,
+    });
+  }
 }
 
 function getProjectAgentMap() {
@@ -763,12 +760,10 @@ function createWindow(opts = {}) {
   windowState.track(win, WINDOW_STATE_FILE, WINDOW_STATE_KEY);
   if (opts.maximized) win.once('show', () => { if (!win.isDestroyed()) win.maximize(); });
 
-  const state = { win, tabBarView, tabs: [], activeTabId: null, tabBarExpanded: false, _raisedTabId: null, lockView: null };
+  const state = { win, tabBarView, tabs: [], activeTabId: null, tabBarExpanded: false, _raisedTabId: null };
   const winId = win.id; // capture before destruction
   windows.set(winId, state);
   reportControlWindows();
-
-  if (isController === false) showLockOverlay(state, 'another client');
 
   const layout = () => {
     if (quitting || win.isDestroyed()) return;
@@ -839,7 +834,6 @@ function createWindow(opts = {}) {
     if (!restarting && !quitting && !isRemoteMode && isController === true && !knownControlPeer) {
       fetch(`http://localhost:${PORT}/api/windows/${winId}/kill-sessions`, { method: 'POST' }).catch(() => {});
     }
-    hideLockOverlay(state);
     windows.delete(winId);
     reportControlWindows();
     // Destroy ghost overlay when last user window closes so app can quit
@@ -881,12 +875,6 @@ function layoutViews(state) {
   state.win.contentView.removeChildView(state.tabBarView);
   state.win.contentView.addChildView(state.tabBarView);
 
-  // Lock overlay stays full-window and above everything, including the tab bar.
-  if (state.lockView) {
-    state.lockView.setBounds({ x: 0, y: 0, width, height });
-    state.win.contentView.removeChildView(state.lockView);
-    state.win.contentView.addChildView(state.lockView);
-  }
 }
 
 // ── Find which window state a tab belongs to ──
@@ -913,6 +901,7 @@ function findStateByWebContentsId(wcId) {
 function withLoadSuffix(url, state, background) {
   const keyParam = isRemoteMode ? `&key=${remoteServerKey}` : '';
   return url + (url.includes('#') ? '&' : '#') + 'windowId=' + state.win.id
+    + '&instance=' + INSTANCE_ID
     + (background ? '&bg=1' : '') + keyParam;
 }
 
@@ -1010,12 +999,15 @@ function closeTab(state, id) {
   const tab = state.tabs[idx];
   if (tab.locked) return;
 
-  // Send kill via JS before destroying — beforeunload alone is unreliable
+  // Send kill via JS before destroying — beforeunload alone is unreliable.
+  // The server only kills a session this user drives (or nobody does); one
+  // someone else drives lives on, so it is not mirrored back in.
+  if (tab.sessionId != null) dismissedSessions.add(tab.sessionId);
   const wc = tab.view.webContents;
   if (!wc.isDestroyed()) {
     wc.executeJavaScript(
-      `(() => { try { if (window._ws && window._ws.readyState === WebSocket.OPEN) window._ws.send(JSON.stringify({type:'kill'})); } catch(e){} })()`
-    ).catch(() => {});
+      `(() => { try { if (window._ws && window._ws.readyState === WebSocket.OPEN) window._ws.send(JSON.stringify({type:'kill'})); } catch(e){} return window._sessionId; })()`
+    ).then((sid) => { if (sid != null) dismissedSessions.add(sid); }).catch(() => {});
   }
 
   state.win.contentView.removeChildView(tab.view);
@@ -1336,10 +1328,19 @@ ipcMain.on('media-badge', (e, count) => {
   }
 });
 
-ipcMain.on('claim-control', () => {
-  if (controlWs && controlWs.readyState === 1) {
-    controlWs.send(JSON.stringify({ type: 'claim-control' }));
+// Shared tabs: who this user is. Any tab page may read it (it is sent to
+// the server anyway); only the app's own pages may change it.
+ipcMain.handle('identity-get', () => clientIdentity.loadIdentity(IDENTITY_FILE));
+ipcMain.handle('identity-set', (e, name) => {
+  if (!isTrustedSender(e)) return clientIdentity.loadIdentity(IDENTITY_FILE);
+  const identity = clientIdentity.saveName(IDENTITY_FILE, name);
+  const js = `window._tabShareRename && window._tabShareRename(${JSON.stringify(identity)})`;
+  for (const st of windows.values()) {
+    for (const tab of st.tabs) {
+      if (!tab.view.webContents.isDestroyed()) tab.view.webContents.executeJavaScript(js).catch(() => {});
+    }
   }
+  return identity;
 });
 
 ipcMain.on('tab-create', (e, urlOrOpts) => {
@@ -1838,6 +1839,9 @@ async function resolvePickerAddress(url, host, { lenient = false } = {}) {
   const parsed = servers.parseAddress(url, servers.DEFAULT_PORT);
   const name = String(host || '').trim() || (parsed.isIp ? '' : parsed.hostname);
   if (parsed.isIp) return { url: parsed.origin, host: name };
+  // TLS needs the name: the certificate and the proxy's routing are both for
+  // the hostname (frontline.servosity.com:8443), so an https entry keeps it.
+  if (parsed.origin.startsWith('https:')) return { url: parsed.origin, host: name };
 
   try {
     const address = await servers.resolveHostIp(parsed.hostname);

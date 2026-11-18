@@ -30,5 +30,4 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getTabs: () => ipcRenderer.invoke('get-tabs'),
   getTheme: () => ipcRenderer.invoke('get-theme'),
   onSettingsUpdated: (cb) => ipcRenderer.on('settings-updated', () => cb()),
-  claimControl: () => ipcRenderer.send('claim-control'),
 });

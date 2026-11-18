@@ -23,6 +23,7 @@ const { createNotificationRouter } = require('./lib/notification-bridge');
 const { createAttentionRouter } = require('./lib/attention-hook');
 const commandLaunch = require('./lib/command-launch');
 const { pickOpenTabTarget, openTabClaimStatus } = require('./lib/open-tab-routing');
+const { createTabOwners, normalizeClient } = require('./lib/tab-owners');
 const { MediaStore, MediaManager, createMediaRouter } = require('./lib/media');
 const { authMiddleware, authenticateWs, hasPassword, setPassword, verifyPassword, isLocalhost, hostGuard, originGuard } = require('./lib/auth');
 const { launchGuard } = require('./lib/launch-guard');
@@ -162,7 +163,9 @@ function setOnSettingsChanged(fn) { onSettingsChanged = fn; }
 const controlClients = new Set();
 // Controller slot — the one control client (Electron instance) currently
 // allowed to drive session lifecycle: kill-sessions on window close and
-// server shutdown. Other connected control clients are locked spectators.
+// server shutdown, and the default target for an unaddressed open-tab.
+// Other control clients work normally; who types into a tab is decided per
+// tab (lib/tab-owners.js), not per app.
 // Handoff: newest claim-control wins; on controller disconnect a grace timer
 // (Task 3) fails over to a surviving client.
 let controllerClient = null;
@@ -299,6 +302,49 @@ function broadcastToSession(sessionId, msg) {
   if (!clients) return;
   for (const ws of clients) {
     if (ws.readyState === 1) ws.send(json);
+  }
+}
+
+// Per-tab ownership: who may type into a session. See lib/tab-owners.js.
+const TAB_OWNER_GRACE_MS = Number(process.env.AI_TABS_OWNER_GRACE_MS || 5000);
+const tabOwners = createTabOwners({
+  graceMs: TAB_OWNER_GRACE_MS,
+  onChange: (id) => broadcastToSession(id, ownerMessage(id)),
+});
+// Sessions a close-tab API call is ending: any client's kill goes through.
+const closingSessions = new Set();
+// sessionId → the Electron instance whose tab created it, so each instance
+// mirrors the sessions it did not open itself.
+const sessionInstances = new Map();
+
+/** Who drives a session, plus the PTY size watchers should render at. */
+function ownerMessage(id) {
+  const session = ptyManager.sessions.get(id);
+  return {
+    type: 'owner',
+    sessionId: id,
+    owner: tabOwners.get(id),
+    cols: session ? session.cols : null,
+    rows: session ? session.rows : null,
+  };
+}
+
+/** ws left session id: if it was the owner's last socket there, start the release. */
+function ownerSocketLeft(id, ws) {
+  const owner = tabOwners.get(id);
+  if (!owner || owner.id !== ws._client.id) return;
+  const clients = sessionClients.get(id);
+  const stillThere = clients && [...clients].some(
+    (c) => c !== ws && c.readyState === 1 && c._client && c._client.id === owner.id
+  );
+  if (!stillThere) tabOwners.scheduleRelease(id);
+}
+
+/** Tell every Electron instance the session list changed, so each mirrors it. */
+function notifySessionsChanged() {
+  const msg = JSON.stringify({ type: 'sessions-changed', sessions: sessionListForControl() });
+  for (const client of controlClients) {
+    if (client.readyState === 1) client.send(msg);
   }
 }
 
@@ -713,6 +759,13 @@ app.post('/api/sessions/:id/input', (req, res) => {
   const { data } = req.body || {};
   if (!data) return res.status(400).json({ error: 'Missing data field' });
   if (!ptyManager.sessions.has(id)) return res.status(404).json({ error: 'Session not found' });
+  // Local automation (orchestrators, hooks) types regardless of who drives.
+  // A remote caller carries no identity, so it may only type into a tab
+  // nobody drives.
+  const owner = tabOwners.get(id);
+  if (owner && !isLocalhost(req)) {
+    return res.status(409).json({ error: `${owner.name} is driving this tab`, owner });
+  }
   ptyManager.write(id, data);
   res.json({ ok: true });
 });
@@ -904,6 +957,7 @@ app.post('/api/sessions/:id/close-tab', (req, res) => {
   const sessionExists = ptyManager.sessions.has(id);
   const windowId = sessionWindows.get(id) || null;
 
+  if (sessionExists) closingSessions.add(id);
   const closeMsg = JSON.stringify({ type: 'close-tab', sessionId: id, windowId });
   let dispatched = false;
   for (const client of controlClients) {
@@ -1048,7 +1102,7 @@ function getLastLine(sessionId) {
 function sessionListForControl() {
   return ptyManager.listSessions().map(s => ({
     id: s.id, cwd: s.cwd, windowId: sessionWindows.get(s.id) || null,
-    agentId: s.agentId,
+    agentId: s.agentId, instance: sessionInstances.get(s.id) || null,
   }));
 }
 
@@ -1122,6 +1176,10 @@ function createSession(msg, ws) {
     (exitCode) => {
       broadcastToSession(id, { type: 'exit', exitCode });
       sessionWindows.delete(id);
+      sessionInstances.delete(id);
+      closingSessions.delete(id);
+      tabOwners.forget(id);
+      notifySessionsChanged();
       statusline.unregister(id);
       media.endSession(id);
     },
@@ -1149,14 +1207,22 @@ function createSession(msg, ws) {
   } else {
     serverDebugLog(`[ws-create] session=${id} NO windowId in create message`);
   }
-  if (ws) getClientsForSession(id).add(ws);
+  if (typeof msg.instance === 'string' && msg.instance) sessionInstances.set(id, msg.instance.slice(0, 64));
+  if (ws) {
+    getClientsForSession(id).add(ws);
+    tabOwners.set(id, ws._client);
+  }
   clearOrphanTimer(id);
   statusline.register(id, { agent: launchAgent, cwd: msg.cwd || null });
   statusline.pushSoon(id);
   // PTY ids restart at 1 per server process: drop any media an earlier
   // process left under this id before its hooks can fire.
   media.beginSession(id);
-  if (ws) ws.send(JSON.stringify({ type: 'created', sessionId: id }));
+  if (ws) {
+    ws.send(JSON.stringify({ type: 'created', sessionId: id }));
+    ws.send(JSON.stringify(ownerMessage(id)));
+  }
+  notifySessionsChanged();
 
   // Link requestId → sessionId for open-tab API polling
   if (msg.requestId && pendingRequests.has(msg.requestId)) {
@@ -1205,6 +1271,11 @@ wss.on('connection', (ws, req) => {
   const isLocalWs = wsAddr === '127.0.0.1' || wsAddr === '::1';
 
   let sessionId = null;
+  // Self-declared identity; pages that predate it share one per address.
+  ws._client = normalizeClient(null, `anon:${wsAddr}`);
+  const adoptClient = (raw) => {
+    if (raw) ws._client = normalizeClient(raw, ws._client.id);
+  };
 
   ws.on('message', (raw) => {
     let msg;
@@ -1293,6 +1364,7 @@ wss.on('connection', (ws, req) => {
       }
 
       case 'create': {
+        adoptClient(msg.client);
         const made = createSession(msg, ws);
         if (made.id != null) sessionId = made.id;
         break;
@@ -1306,8 +1378,10 @@ wss.on('connection', (ws, req) => {
           break;
         }
 
+        adoptClient(msg.client);
         // Detach from any previous session
         if (sessionId != null) {
+          ownerSocketLeft(sessionId, ws);
           const prevClients = sessionClients.get(sessionId);
           if (prevClients) {
             prevClients.delete(ws);
@@ -1318,6 +1392,8 @@ wss.on('connection', (ws, req) => {
         sessionId = targetId;
         getClientsForSession(targetId).add(ws);
         clearOrphanTimer(targetId);
+        const owner = tabOwners.get(targetId);
+        if (owner && owner.id === ws._client.id) tabOwners.cancelRelease(targetId);
         statusline.pushSoon(targetId, 300);
 
         // Send plain-text scrollback inside 'attached' so client can write it
@@ -1331,6 +1407,7 @@ wss.on('connection', (ws, req) => {
         const scrollback = onAltScreen ? '' : (ptyManager.getRecentOutputPlain(targetId) || '');
         const info = ptyManager.getSessionInfo(targetId);
         ws.send(JSON.stringify({ type: 'attached', sessionId: targetId, info, scrollback, altScreen: onAltScreen }));
+        ws.send(JSON.stringify(ownerMessage(targetId)));
 
         // Nudge after the client's own fit()/resize has landed, so the app
         // repaints at the size this client actually has rather than the previous
@@ -1341,14 +1418,39 @@ wss.on('connection', (ws, req) => {
       }
 
       case 'data': {
-        if (sessionId != null) ptyManager.write(sessionId, msg.data);
+        if (sessionId == null) break;
+        if (tabOwners.drive(sessionId, ws._client)) {
+          ptyManager.write(sessionId, msg.data);
+        } else {
+          ws.send(JSON.stringify({ ...ownerMessage(sessionId), blocked: true }));
+        }
         break;
       }
 
       case 'resize': {
-        if (sessionId != null && msg.cols && msg.rows) {
-          ptyManager.resize(sessionId, msg.cols, msg.rows);
+        // Only the driver sizes the PTY; watchers render at its size.
+        if (sessionId == null || !msg.cols || !msg.rows) break;
+        if (!tabOwners.mayDrive(sessionId, ws._client)) break;
+        const session = ptyManager.sessions.get(sessionId);
+        const changed = session && (session.cols !== msg.cols || session.rows !== msg.rows);
+        ptyManager.resize(sessionId, msg.cols, msg.rows);
+        if (changed) {
+          const sizeMsg = JSON.stringify({ type: 'size', sessionId, cols: msg.cols, rows: msg.rows });
+          for (const c of sessionClients.get(sessionId) || []) {
+            if (c !== ws && c.readyState === 1) c.send(sizeMsg);
+          }
         }
+        break;
+      }
+
+      case 'identify': {
+        adoptClient(msg.client);
+        tabOwners.rename(ws._client);
+        break;
+      }
+
+      case 'claim-tab': {
+        if (sessionId != null && ptyManager.sessions.has(sessionId)) tabOwners.claim(sessionId, ws._client);
         break;
       }
 
@@ -1361,7 +1463,15 @@ wss.on('connection', (ws, req) => {
       }
 
       case 'kill': {
-        // Explicit kill request (desktop tab close)
+        // Explicit kill request (desktop tab close). Closing a tab someone
+        // else drives only detaches this client; the session lives on.
+        if (sessionId != null && !tabOwners.mayDrive(sessionId, ws._client) && !closingSessions.has(sessionId)) {
+          ownerSocketLeft(sessionId, ws);
+          const clients = sessionClients.get(sessionId);
+          if (clients) clients.delete(ws);
+          sessionId = null;
+          break;
+        }
         if (sessionId != null) {
           ptyManager.kill(sessionId);
           clearOrphanTimer(sessionId);
@@ -1389,6 +1499,7 @@ wss.on('connection', (ws, req) => {
       }, CONTROLLER_FAILOVER_GRACE_MS);
     }
     if (sessionId != null) {
+      ownerSocketLeft(sessionId, ws);
       const clients = sessionClients.get(sessionId);
       if (clients) {
         clients.delete(ws);

@@ -3,38 +3,7 @@ const assert = require('node:assert/strict');
 const os = require('node:os');
 const path = require('node:path');
 
-// Capture the server's WebSocket connection handler without binding a port.
-let connectionHandler = null;
-class CapturingWebSocketServer {
-  on(event, handler) {
-    if (event === 'connection') connectionHandler = handler;
-    return this;
-  }
-}
-
-const wsPath = require.resolve('ws');
-const realWs = require(wsPath);
-require.cache[wsPath].exports = { ...realWs, WebSocketServer: CapturingWebSocketServer };
-const server = require('../server');
-require.cache[wsPath].exports = realWs;
-
-function fakeSocket() {
-  const handlers = {};
-  return {
-    readyState: 1,
-    sent: [],
-    on(event, handler) { handlers[event] = handler; },
-    send(payload) { this.sent.push(JSON.parse(payload)); },
-    close() {},
-    receive(message) { handlers.message(JSON.stringify(message)); },
-  };
-}
-
-function connect() {
-  const socket = fakeSocket();
-  connectionHandler(socket, { headers: {}, socket: { remoteAddress: '127.0.0.1' }, url: '/' });
-  return socket;
-}
+const { server, connect } = require('./helpers/ws-harness');
 
 test('create in a missing folder answers an error instead of crashing', (t) => {
   const originalSpawn = server.ptyManager.spawn;

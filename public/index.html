@@ -529,6 +529,7 @@
   <script src="/term-search.js"></script>
   <script src="/osc52.js"></script>
   <script src="/sl-rate-limits.js"></script>
+  <script src="/tab-share.js"></script>
   <script src="/inline-match.js"></script>
   <script src="/term-overlay.js"></script>
   <script src="/inline-gaps.js"></script>
@@ -544,6 +545,8 @@
     const paramRequestId = params.get('requestId');
     const hashParams = new URLSearchParams(location.hash.slice(1));
     const paramWindowId = params.get('windowId') || hashParams.get('windowId');
+    // The desktop instance that opened this tab: it mirrors every other one's.
+    const paramInstance = hashParams.get('instance') || null;
     const isBackgroundTab = hashParams.get('bg') === '1';
     const paramSessionId = params.get('sessionId') ? parseInt(params.get('sessionId'), 10) : null;
     const wsAuthKey = hashParams.get('key') || params.get('key') || null;
@@ -1141,7 +1144,50 @@
         let reconnectAttempt = 0;
         const MAX_RECONNECT_ATTEMPTS = 20; // ~4.5 min with backoff, within 5-min orphan window
 
+        // ── Shared tabs: one driver per tab (public/tab-share.js) ──
+        let me = null;          // this client's { id, name }
+        let ownerState = null;  // last {type:'owner'} from the server
+        const ownerBanner = TabShare.createOwnerBanner(document.body, {
+          onClaim: () => {
+            if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'claim-tab' }));
+          },
+        });
+        const watching = () => !TabShare.canDrive(ownerState, me);
+
+        // Send this client's size to the PTY — only the driver's counts.
+        function pushSize() {
+          if (watching()) return;
+          fitAddon.fit();
+          const dims = fitAddon.proposeDimensions();
+          if (dims && ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'resize', cols: dims.cols, rows: dims.rows }));
+          }
+        }
+
+        // A watcher draws at the driver's size, so wrapped lines line up.
+        function followSize(cols, rows) {
+          if (watching() && cols && rows && (term.cols !== cols || term.rows !== rows)) term.resize(cols, rows);
+        }
+
+        function onOwner(msg) {
+          const wasDriving = !watching();
+          ownerState = msg;
+          ownerBanner.update(msg, me);
+          if (watching()) followSize(msg.cols, msg.rows);
+          else if (!wasDriving) pushSize();
+        }
+
+        window._tabShareRename = (identity) => {
+          me = identity;
+          if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'identify', client: me }));
+          ownerBanner.update(ownerState, me);
+        };
+
         function sendData(data) {
+          if (watching()) {
+            ownerBanner.update({ ...ownerState, blocked: true }, me);
+            return;
+          }
           if (ws && ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify({ type: 'data', data }));
           }
@@ -1311,14 +1357,14 @@
               // Reattach to the orphaned session
               const dims = fitAddon.proposeDimensions();
               sock.send(JSON.stringify({
-                type: 'attach', sessionId,
+                type: 'attach', sessionId, client: me,
                 cols: dims ? dims.cols : 120,
                 rows: dims ? dims.rows : 30,
               }));
             } else {
               const dims = fitAddon.proposeDimensions();
               const createMsg = {
-                type: 'create', cwd,
+                type: 'create', cwd, client: me,
                 cols: dims ? dims.cols : 120,
                 rows: dims ? dims.rows : 30,
               };
@@ -1334,6 +1380,9 @@
               }
               if (paramWindowId) {
                 createMsg.windowId = paramWindowId;
+              }
+              if (paramInstance) {
+                createMsg.instance = paramInstance;
               }
               sock.send(JSON.stringify(createMsg));
             }
@@ -1371,6 +1420,12 @@
               case 'data':
                 term.write(msg.data);
                 markActive();
+                break;
+              case 'owner':
+                if (msg.sessionId === sessionId) onOwner(msg);
+                break;
+              case 'size':
+                if (msg.sessionId === sessionId) followSize(msg.cols, msg.rows);
                 break;
               case 'idle':
               case 'cc-notification':
@@ -1417,7 +1472,8 @@
                   slEnabled = !s.statusline || s.statusline.enabled !== false;
                   slApplyTheme(p);
                   slRender();
-                  fitAddon.fit();
+                  if (watching()) followSize(ownerState.cols, ownerState.rows);
+                  else fitAddon.fit();
                 });
                 break;
               case 'exit':
@@ -1464,10 +1520,15 @@
         const wsUrl = wsAuthKey
           ? `${wsScheme}://${location.host}?key=${wsAuthKey}`
           : `${wsScheme}://${location.host}`;
-        ws = new WebSocket(wsUrl);
-        window._ws = ws;
-        // If sessionId came from URL (post-restart reconnect), attach instead of create
-        wireWebSocket(ws, paramSessionId != null);
+        // Identity first: create/attach carry it, and the server picks the
+        // tab's driver from it.
+        TabShare.getIdentity().then((identity) => {
+          me = identity;
+          ws = new WebSocket(wsUrl);
+          window._ws = ws;
+          // If sessionId came from URL (post-restart reconnect), attach instead of create
+          wireWebSocket(ws, paramSessionId != null);
+        });
 
         // Kill session when an Electron tab is intentionally closed. This is a
         // backstop only — main.js destroyTab() injects the same kill explicitly.
@@ -1483,14 +1544,8 @@
           });
         }
 
-        // Resize handling
-        new ResizeObserver(() => {
-          fitAddon.fit();
-          const dims = fitAddon.proposeDimensions();
-          if (dims && ws && ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: 'resize', cols: dims.cols, rows: dims.rows }));
-          }
-        }).observe(container);
+        // Resize handling — a watcher keeps the driver's size (followSize)
+        new ResizeObserver(() => pushSize()).observe(container);
 
         // When this tab gains Electron focus (via webContents.focus() in the
         // main process), the renderer's window fires a 'focus' event.  Use it
@@ -1504,11 +1559,7 @@
         // Called by main process via executeJavaScript on tab switch —
         // refit terminal to current bounds and send resize to server.
         window._activateTab = () => {
-          fitAddon.fit();
-          const dims = fitAddon.proposeDimensions();
-          if (dims && ws && ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: 'resize', cols: dims.cols, rows: dims.rows }));
-          }
+          pushSize();
           term.focus();
         };
       });
@@ -1769,6 +1820,11 @@
                     <input id="set-remote-password" type="password" autocomplete="new-password" placeholder="Not set" style="min-width:200px">
                     <button class="reset-btn" id="set-password-btn" style="margin-left:8px">Save</button>
                     <span id="set-password-status" style="margin-left:12px;font-size:12px;color:var(--muted)"></span>
+                  </div>
+                  <div class="settings-row">
+                    <label title="Shown to others on a tab you are driving, and on the 'Take this tab' bar when they drive. Kept on this device.">Your name</label>
+                    <input id="set-client-name" type="text" autocomplete="off" maxlength="40" placeholder="Shown to others on shared tabs" style="min-width:200px">
+                    <span id="set-client-name-status" style="margin-left:12px;font-size:12px;color:var(--muted)"></span>
                   </div>
                   <div class="settings-row">
                     <label title="Shown on the landing page as a bookmarkable URL for reaching this machine from outside the LAN (e.g. tailnet or DDNS hostname). Display-only.">Remote hostname</label>
@@ -3035,7 +3091,24 @@
         });
       }
 
+      // Shared tabs: this device's display name (public/tab-share.js).
+      function wireClientNameSetting() {
+        const $name = document.getElementById('set-client-name');
+        const $status = document.getElementById('set-client-name-status');
+        TabShare.getIdentity().then((identity) => { $name.value = identity.name; }).catch(() => {});
+        $name.addEventListener('change', async () => {
+          try {
+            const identity = await TabShare.setName($name.value);
+            $name.value = identity.name;
+            $status.textContent = 'Saved';
+          } catch {
+            $status.textContent = 'Could not save';
+          }
+        });
+      }
+
       function wireRemoteAccessSettings(passwordSet) {
+        wireClientNameSetting();
         const $input = document.getElementById('set-remote-password');
         const $btn = document.getElementById('set-password-btn');
         const $status = document.getElementById('set-password-status');

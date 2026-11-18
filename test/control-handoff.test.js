@@ -1,4 +1,4 @@
-// Controller-slot handoff: remote clients preempt the local GUI, claim-control
+// Controller-slot handoff (who gets unaddressed open-tabs and whose quit ends the server): remote clients preempt the local GUI, claim-control
 // ping-pongs control, and a claiming registrant takes over from any holder.
 const { test, before, after } = require('node:test');
 const assert = require('node:assert');
@@ -224,7 +224,7 @@ test('sole local controller releasing gets shutdown:true and the server exits', 
   }
 });
 
-test('local registering while a remote holds control becomes a locked spectator', async (t) => {
+test('local registering while a remote holds the slot is not primary', async (t) => {
   if (!handle.base) return t.skip('no non-internal IPv4');
   await new Promise((r) => setTimeout(r, 700));
   const remote = controlClient('remote');
@@ -236,7 +236,7 @@ test('local registering while a remote holds control becomes a locked spectator'
   assert.strictEqual(localReady.isPrimary, false);
   // by must be the remote's address, NOT 'local' — 'local' is the quit-dialog signal
   assert.ok(localReady.controller && localReady.controller.by && localReady.controller.by !== 'local');
-  // and the local spectator is not granted control
+  // and the local client is not granted the slot
   await new Promise((r) => setTimeout(r, 500));
   assert.strictEqual(local.messages.filter((m) => m.type === 'control-granted').length, 0);
   local.ws.close(); remote.ws.close();

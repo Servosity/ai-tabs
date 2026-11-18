@@ -42,3 +42,10 @@ contextBridge.exposeInMainWorld('electronRemote', {
   pickerOpen: () => ipcRenderer.invoke('picker-open'),
   pickFolder: (defaultPath = '') => ipcRenderer.invoke('pick-folder', defaultPath),
 });
+
+// Shared tabs: this user's { id, name } (public/tab-share.js). Kept on THIS
+// machine, like the remote-server config above.
+contextBridge.exposeInMainWorld('electronIdentity', {
+  get: () => ipcRenderer.invoke('identity-get'),
+  set: (name) => ipcRenderer.invoke('identity-set', name),
+});

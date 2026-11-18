@@ -271,6 +271,7 @@
 <script src="/xterm/lib/addon-fit/addon-fit.js"></script>
 <script src="/xterm/lib/addon-unicode11/addon-unicode11.js"></script>
 <script src="/xterm/lib/addon-web-links/addon-web-links.js"></script>
+<script src="/tab-share.js"></script>
 <script>
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('/sw.js').catch(() => {});
@@ -285,6 +286,10 @@
   let refreshTimer = null;
   let allProjects = [];
   let favorites = new Set();
+  // Shared tabs (public/tab-share.js): who we are, who drives the open tab.
+  let me = null;
+  let ownerState = null;
+  let ownerBanner = null;
 
   // ── DOM refs ──
   const $authScreen = document.getElementById('auth-screen');
@@ -357,12 +362,22 @@
   })();
 
   // ── App ──
-  function showApp() {
+  async function showApp() {
     $authScreen.classList.add('hidden');
     $app.classList.remove('hidden');
+    me = await TabShare.getIdentity();
+    ownerBanner = TabShare.createOwnerBanner($detailView, {
+      onClaim: () => {
+        if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'claim-tab' }));
+      },
+    });
     loadSessions();
     startAutoRefresh();
     connectWebSocket();
+  }
+
+  function attachMsg(sessionId) {
+    return JSON.stringify({ type: 'attach', sessionId, client: me });
   }
 
   function connectWebSocket() {
@@ -372,7 +387,7 @@
 
     ws.onopen = () => {
       if (currentSessionId != null) {
-        ws.send(JSON.stringify({ type: 'attach', sessionId: currentSessionId }));
+        ws.send(attachMsg(currentSessionId));
       }
     };
 
@@ -403,6 +418,12 @@
         case 'attached':
           break;
 
+        case 'owner':
+          if (msg.sessionId !== currentSessionId) break;
+          ownerState = msg;
+          if (ownerBanner) ownerBanner.update(msg, me);
+          break;
+
         case 'exit':
           if (term) term.write('\r\n\x1b[90m[Process exited]\x1b[0m\r\n');
           break;
@@ -430,7 +451,7 @@
     if (currentSessionId != null) {
       // Re-attach to get fresh output — server sends ring buffer on attach
       if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'attach', sessionId: currentSessionId }));
+        ws.send(attachMsg(currentSessionId));
       }
       // Also check for permission prompts
       checkForPermissionPrompt();
@@ -501,7 +522,7 @@
 
     // Attach via WebSocket — server sends recent output buffer on attach
     if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'attach', sessionId: id }));
+      ws.send(attachMsg(id));
     }
 
     stopAutoRefresh();
@@ -509,6 +530,8 @@
 
   function closeSession() {
     currentSessionId = null;
+    ownerState = null;
+    if (ownerBanner) ownerBanner.update(null, me);
     $sessionList.classList.remove('hidden');
     $detailView.classList.add('hidden');
     $backBtn.classList.add('hidden');
@@ -572,6 +595,10 @@
   // ── Input ──
   function sendInput(text) {
     if (!currentSessionId) return;
+    if (!TabShare.canDrive(ownerState, me)) {
+      ownerBanner.update({ ...ownerState, blocked: true }, me);
+      return;
+    }
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type: 'data', data: text }));
     } else {

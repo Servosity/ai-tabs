@@ -177,18 +177,32 @@ first, but the usual reason to edit an entry is that it is unreachable — so a
 failed check offers **Save without checking**, which stores the entry exactly
 as typed.
 
-### Control handoff
+### Shared tabs
 
-The server's own GUI no longer has to be closed. When a remote client connects,
-the GUI on the server machine locks behind a "Remote client in control" screen —
-sessions keep running and the remote client picks them up live. Whoever clicked
-last has control: a **Take control** button on the lock screen swaps sides at
-any time, from either machine. When the remote client quits or drops off the
-network, control returns to the server's GUI automatically after a few seconds.
+Several people can work on one server at once, from the desktop app or a
+browser. Every connected desktop app shows every session; a browser lists them
+on `/mobile.html`. Who types is decided **per tab**:
 
-Quitting a GUI while another client is connected hands control over instead of
-shutting anything down. Quitting the server machine's GUI when nothing else is
-connected still shuts down the server and its sessions, as before.
+- The person who opens a tab drives it. Everyone else attached to that tab sees
+  it live, at the driver's terminal size, under a bar that says who is driving.
+- **Take this tab** on that bar makes you the driver. Keystrokes and resizes
+  from anyone who isn't driving are dropped by the server.
+- Typing into a tab nobody drives makes you its driver. When the driver
+  disconnects, the tab is released after a few seconds.
+- Closing a tab you drive ends its session for everyone. Closing one someone
+  else drives only closes it for you; the session keeps running.
+- Names are self-declared per device: a browser asks once, and the desktop app
+  uses your OS user name. You can change yours under **Settings → Remote access → Your name**.
+  There is one shared password, so a name is a label, not a login.
+
+Local automation (`POST /api/sessions/:id/input` from localhost) types into any
+tab. A remote caller to that endpoint can only type into a tab nobody drives.
+
+The controller slot still exists, but it no longer locks anyone out. It only
+decides which desktop app receives an unaddressed open-tab request. It also
+decides whose quit shuts the server down: quitting the server machine's GUI
+when no other client is connected stops the server and its sessions. Quitting
+while another client is connected hands the slot over instead.
 
 **Use the server's IP address.** The server only accepts hostnames it owns
 (its own IPs plus loopback), so connecting by a DNS or Tailscale name is
