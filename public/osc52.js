@@ -6,6 +6,9 @@
  * itself and copies it by emitting `ESC ] 52 ; c ; <base64> BEL`. xterm.js
  * ignores OSC 52 unless a handler is registered, so without this the copy was
  * silently dropped and only Shift+drag (xterm's forced selection) worked.
+ * Clicks and drags are left to the app (it also does click-to-copy on code
+ * blocks and keeps selecting while the wheel scrolls), so createAppCopy keeps
+ * its last copy for smart right-click.
  *
  * Writes only. A `?` payload asks the terminal to report the clipboard back to
  * the app — that would let any program in a tab read the OS clipboard, so it
@@ -51,5 +54,19 @@
     });
   }
 
-  return { decodeOsc52, install, OSC_CLIPBOARD, MAX_BASE64_LENGTH };
+  /**
+   * The app's most recent copy, kept until the user moves on (a left-click or
+   * a keypress clears it). While set it stands in for a terminal selection:
+   * the app's own highlight is invisible to xterm.
+   */
+  function createAppCopy() {
+    let last = '';
+    return {
+      copied(text) { last = text || ''; },
+      clear() { last = ''; },
+      text() { return last; },
+    };
+  }
+
+  return { decodeOsc52, install, createAppCopy, OSC_CLIPBOARD, MAX_BASE64_LENGTH };
 });

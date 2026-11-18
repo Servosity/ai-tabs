@@ -528,7 +528,6 @@
   <script src="/xterm/lib/addon-search/addon-search.js"></script>
   <script src="/term-search.js"></script>
   <script src="/osc52.js"></script>
-  <script src="/force-selection.js"></script>
   <script src="/sl-rate-limits.js"></script>
   <script src="/inline-match.js"></script>
   <script src="/term-overlay.js"></script>
@@ -898,11 +897,16 @@
           }
         }
         setupCopyOnSelect(settings.behavior.copyOnSelect);
-        // Apps that own the mouse (Claude Code fullscreen) copy via OSC 52.
-        Osc52.install(term, writeClipboard, ccDebugLog);
-        // ...but a plain drag still makes OUR selection, so smart right-click
-        // and copy-on-select see it (see public/force-selection.js).
-        ForceSelection.install(container, term);
+        // Apps that own the mouse (Claude Code fullscreen on Linux/macOS) select
+        // and copy themselves — drag-select, click-to-copy on code blocks — and
+        // hand us the text via OSC 52. Clicks and drags must reach the app, so
+        // ai-tabs never sees that selection; remember the app's last copy so
+        // smart right-click copies it instead of pasting. Shift+drag still
+        // makes an xterm selection.
+        const appCopy = Osc52.createAppCopy();
+        Osc52.install(term, (text) => { appCopy.copied(text); return writeClipboard(text); }, ccDebugLog);
+        container.addEventListener('mousedown', (e) => { if (e.button === 0) appCopy.clear(); }, true);
+        container.addEventListener('keydown', () => appCopy.clear(), true);
         ccDebugLog('clipenv', JSON.stringify({
           secureContext: window.isSecureContext,
           hasClipboard: !!navigator.clipboard,
@@ -945,11 +949,13 @@
           // Nothing to offer on an origin we can't read the clipboard from and
           // with no selection to copy — show the native menu (it has a working
           // Paste) rather than swallowing the click and doing nothing.
-          if (!canReadClipboard() && !term.hasSelection() && !lastRawSelection) return;
+          if (!canReadClipboard() && !term.hasSelection() && !lastRawSelection && !appCopy.text()) return;
           e.preventDefault();
           if (currentRightClick === 'smart') {
             const live = getUnwrappedSelection(term);
-            const sel = live || getUnwrappedSelection(term, lastRawSelection);
+            // The app's copy is re-written on this click: the OSC 52 write came
+            // over the socket after the gesture and may have been refused.
+            const sel = live || getUnwrappedSelection(term, lastRawSelection) || appCopy.text();
             ccDebugLog('rclick', JSON.stringify({
               mode: 'smart',
               branch: sel ? 'copy' : 'paste',
@@ -958,7 +964,7 @@
             }));
             if (sel) {
               writeClipboard(sel)
-                .then(() => { term.clearSelection(); lastRawSelection = ''; })
+                .then(() => { term.clearSelection(); lastRawSelection = ''; appCopy.clear(); })
                 .catch(() => {});
             } else {
               rightClickPaste();

@@ -60,3 +60,19 @@ test('baseEnv does not mutate the environment it reads', () => {
   baseEnv(source);
   assert.strictEqual(source.CLAUDE_PID, '3120');
 });
+
+// Claude Code's fullscreen renderer draws in the alternate screen, where the
+// copy boxes over code blocks (public/inline-marks.js) never look.
+test('a spawned terminal asks Claude Code for the classic renderer; extraEnv can override', () => {
+  const { PtyManager, AGENT_RENDERER_ENV } = require('../lib/pty-manager');
+  const envs = [];
+  const spawn = (shell, args, opts) => {
+    envs.push(opts.env);
+    return { pid: 1, onData() {}, onExit() {}, write() {}, kill() {}, resize() {} };
+  };
+  const mgr = new PtyManager({ spawn });
+  mgr.create('/tmp', () => {}, () => {}, () => {});
+  mgr.create('/tmp', () => {}, () => {}, () => {}, 120, 30, { CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN: '0' });
+  assert.strictEqual(envs[0].CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN, AGENT_RENDERER_ENV.CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN);
+  assert.strictEqual(envs[1].CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN, '0');
+});

@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert');
-const { decodeOsc52, install, MAX_BASE64_LENGTH } = require('../public/osc52');
+const { decodeOsc52, install, createAppCopy, MAX_BASE64_LENGTH } = require('../public/osc52');
 
 const b64 = (s) => Buffer.from(s, 'utf8').toString('base64');
 
@@ -26,4 +26,13 @@ test('install registers OSC 52 and writes only decoded text', () => {
   assert.strictEqual(handler('c;' + b64('copied')), true);
   assert.strictEqual(handler('c;?'), true);
   assert.deepStrictEqual(written, ['copied']);
+});
+
+test('createAppCopy holds the app\'s last copy until cleared', () => {
+  const c = createAppCopy();
+  assert.strictEqual(c.text(), '');
+  c.copied('first'); c.copied('second');
+  assert.strictEqual(c.text(), 'second');
+  c.clear();
+  assert.strictEqual(c.text(), '');
 });
