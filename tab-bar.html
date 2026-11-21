@@ -155,12 +155,16 @@
       height: 1px; margin: 4px 8px; background: var(--tab-border);
     }
 
+    /* macOS: traffic-light buttons sit on the left, not the right */
+    html.mac #tab-bar { padding-left: 78px; padding-right: 0; }
+
   </style>
 </head>
 <body>
   <div id="tab-bar"></div>
   <div id="context-menu"></div>
   <script>
+    if (/Mac/.test(navigator.platform)) document.documentElement.classList.add('mac');
     const bar = document.getElementById('tab-bar');
     let currentTabs = [];
     let editingTabId = null; // tab currently being renamed — skip re-render for it

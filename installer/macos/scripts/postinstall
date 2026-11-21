@@ -43,14 +43,22 @@ cat > "${APP_DIR}/Contents/Info.plist" << 'PLIST'
 </plist>
 PLIST
 
+# Apps launched from Finder/Spotlight get a minimal PATH (no Homebrew, no
+# ~/.local/bin), so bake in the Node found now and add the usual agent CLI
+# locations. Fall back to Homebrew's prefix if node isn't on this script's PATH.
+NODE_DIR="$(dirname "$(command -v node 2>/dev/null || echo /opt/homebrew/bin/node)")"
 cat > "${APP_DIR}/Contents/MacOS/ai-tabs" << LAUNCHER
 #!/bin/bash
-cd "${INSTALL_DIR}"
-if ! lsof -iTCP:25283 -sTCP:LISTEN -t >/dev/null 2>&1; then
-    nohup node server.js > /dev/null 2>&1 &
-    sleep 2
+export PATH="${NODE_DIR}:/opt/homebrew/bin:/usr/local/bin:\$HOME/.local/bin:\$PATH"
+ELECTRON_APP="${INSTALL_DIR}/node_modules/electron/dist/Electron.app"
+
+# Already running? Bring the existing window forward instead of opening another.
+if pgrep -f "\$ELECTRON_APP/Contents/MacOS/Electron \\." >/dev/null; then
+    exec open -a "\$ELECTRON_APP"
 fi
-open "http://localhost:25283"
+
+cd "${INSTALL_DIR}"
+exec node scripts/start.js
 LAUNCHER
 chmod +x "${APP_DIR}/Contents/MacOS/ai-tabs"
 
