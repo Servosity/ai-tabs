@@ -272,6 +272,7 @@
 <script src="/xterm/lib/addon-unicode11/addon-unicode11.js"></script>
 <script src="/xterm/lib/addon-web-links/addon-web-links.js"></script>
 <script src="/tab-share.js"></script>
+<script src="/term-links.js"></script>
 <script>
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('/sw.js').catch(() => {});
@@ -558,12 +559,14 @@
       $terminalPane.innerHTML = '';
     }
 
+    const activateLink = TermLinks.linkActivator((uri) => window.open(uri, '_blank'));
     term = new Terminal({
       cursorBlink: true,
       fontSize: 13,
       fontFamily: "'Cascadia Code', 'Consolas', monospace",
       theme: { background: '#0f0f1e', foreground: '#e0e0e0' },
       allowProposedApi: true,
+      linkHandler: TermLinks.oscLinkHandler(activateLink),
     });
 
     fitAddon = new FitAddon.FitAddon();
@@ -573,7 +576,7 @@
     term.loadAddon(unicode11Addon);
     term.unicode.activeVersion = '11';
 
-    term.loadAddon(new WebLinksAddon.WebLinksAddon());
+    term.loadAddon(new WebLinksAddon.WebLinksAddon(activateLink));
 
     term.open($terminalPane);
     fitAddon.fit();

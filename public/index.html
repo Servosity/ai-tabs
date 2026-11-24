@@ -528,6 +528,7 @@
   <script src="/xterm/lib/addon-search/addon-search.js"></script>
   <script src="/term-search.js"></script>
   <script src="/osc52.js"></script>
+  <script src="/term-links.js"></script>
   <script src="/sl-rate-limits.js"></script>
   <script src="/tab-share.js"></script>
   <script src="/inline-match.js"></script>
@@ -596,6 +597,11 @@
       // Fetch settings before creating terminal
       fetchSettingsAndPreset().then(({ settings, preset }) => {
 
+        // One opener for regex-found URLs and OSC 8 hyperlinks (public/term-links.js).
+        const activateLink = TermLinks.linkActivator(
+          (uri) => window.open(uri, '_blank'),
+          () => term.focus(),
+        );
         const term = new Terminal({
           cursorBlink: settings.cursor.blink,
           cursorStyle: settings.cursor.style,
@@ -607,6 +613,7 @@
           scrollback: settings.terminal.scrollback,
           theme: preset.terminal,
           allowProposedApi: true,
+          linkHandler: TermLinks.oscLinkHandler(activateLink),
         });
 
         // Ligatures: xterm 5.5 has no fontLigatures option and the WebGL
@@ -627,9 +634,7 @@
         term.unicode.activeVersion = '11';
 
         // Clickable links
-        term.loadAddon(new WebLinksAddon.WebLinksAddon((event, uri) => {
-          window.open(uri, '_blank');
-        }));
+        term.loadAddon(new WebLinksAddon.WebLinksAddon(activateLink));
 
         term.open(container);
         container.style.padding = settings.terminal.padding + 'px';
